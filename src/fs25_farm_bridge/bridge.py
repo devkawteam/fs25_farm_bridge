@@ -2,7 +2,7 @@ import logging
 from typing import List, Optional
 
 from .base44 import Base44Client
-from .config import Config
+from .config import Config, ServerConfig
 from .state import BridgeState
 from .utils import (
     fetch_ftp_file,
@@ -32,71 +32,110 @@ _PLAYERS_FILE = "/gameserver/savegame/serverPlayers.xml"
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def run() -> None:
+def run(selected_server: Optional[int] = None, run_all: bool = False) -> None:
     """Top-level bridge run: fetch → parse → diff → publish."""
     config = Config()
-    state = BridgeState(config.cache_file)
-    client = Base44Client(
-        api_url=config.base44_api_url,
-        api_key=config.base44_api_key,
-        timeout=config.request_timeout,
-        retry_attempts=config.retry_attempts,
-    )
+    servers = config.get_servers(selected_server=selected_server, run_all=run_all)
 
-    try:
-        _sync(config, state, client)
-    finally:
-        state.save()
-        client.close()
+    for server in servers:
+        logger.info(
+            "Starting sync for server %s (%s)",
+            server.server_id,
+            server.name,
+        )
+
+        state = BridgeState(server.cache_file)
+        client = Base44Client(
+            api_url=server.base44_api_url,
+            api_key=server.base44_api_key,
+            timeout=config.request_timeout,
+            retry_attempts=config.retry_attempts,
+        )
+
+        try:
+            _sync(server, state, client)
+        finally:
+            state.save()
+            client.close()
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _fetch(config: Config, path: str) -> Optional[bytes]:
+def _fetch(server: ServerConfig, path: str) -> Optional[bytes]:
     return fetch_ftp_file(
-        host=config.ftp_host,
-        port=config.ftp_port,
-        user=config.ftp_user,
-        password=config.ftp_pass,
+        host=server.ftp_host,
+        port=server.ftp_port,
+        user=server.ftp_user,
+        password=server.ftp_pass,
         path=path,
     )
 
 
-def _sync(config: Config, state: BridgeState, client: Base44Client) -> None:
+def _sync(server: ServerConfig, state: BridgeState, client: Base44Client) -> None:
     """Fetch all data sources, detect changes, and push updates to Base44."""
 
     # -- Environment (merge live stats + savegame) --
-    live_bytes = _fetch(config, _DEDICATED_STATS)
+    live_bytes = _fetch(server, _DEDICATED_STATS)
     live_root = parse_xml(live_bytes) if live_bytes else None
     live_env = parse_environment(live_root) if live_root is not None else {}
 
-    savegame_bytes = _fetch(config, _CAREER_SAVEGAME)
+    savegame_bytes = _fetch(server, _CAREER_SAVEGAME)
     savegame_root = parse_xml(savegame_bytes) if savegame_bytes else None
     savegame_env = parse_environment(savegame_root) if savegame_root is not None else {}
 
     environment = merge_data(live_env, savegame_env)
+    if environment:
+        environment["serverId"] = server.server_id
+        environment["serverName"] = server.name
 
     # -- Farms --
-    farms_bytes = _fetch(config, _FARMS_FILE)
+    farms_bytes = _fetch(server, _FARMS_FILE)
     farms_root = parse_xml(farms_bytes) if farms_bytes else None
     farms = parse_farms(farms_root) if farms_root is not None else []
+    farms = [
+        {
+            **farm,
+            "serverId": server.server_id,
+            "serverName": server.name,
+        }
+        for farm in farms
+    ]
 
     # -- Fields --
-    fields_bytes = _fetch(config, _FIELDS_FILE)
+    fields_bytes = _fetch(server, _FIELDS_FILE)
     fields_root = parse_xml(fields_bytes) if fields_bytes else None
     fields = parse_fields(fields_root) if fields_root is not None else []
+    fields = [
+        {
+            **field,
+            "serverId": server.server_id,
+            "serverName": server.name,
+        }
+        for field in fields
+    ]
 
     # -- Economy --
-    economy_bytes = _fetch(config, _ECONOMY_FILE)
+    economy_bytes = _fetch(server, _ECONOMY_FILE)
     economy_root = parse_xml(economy_bytes) if economy_bytes else None
     economy = parse_economy(economy_root) if economy_root is not None else {}
+    if economy:
+        economy["serverId"] = server.server_id
+        economy["serverName"] = server.name
 
     # -- Players --
-    players_bytes = _fetch(config, _PLAYERS_FILE)
+    players_bytes = _fetch(server, _PLAYERS_FILE)
     players_root = parse_xml(players_bytes) if players_bytes else None
     players = parse_players(players_root) if players_root is not None else []
+    players = [
+        {
+            **player,
+            "serverId": server.server_id,
+            "serverName": server.name,
+        }
+        for player in players
+    ]
 
     # -- Smart sync: only forward what changed --
     _publish_environment(state, client, environment)
@@ -105,7 +144,11 @@ def _sync(config: Config, state: BridgeState, client: Base44Client) -> None:
     _publish_economy(state, client, economy)
     _publish_players(state, client, players)
 
-    logger.info("Bridge sync complete.")
+    logger.info(
+        "Bridge sync complete for server %s (%s).",
+        server.server_id,
+        server.name,
+    )
 
 
 def _publish_environment(
