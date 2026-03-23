@@ -171,22 +171,10 @@ def _sync(
         for player in players
     ]
 
-    # Build player lists on each farm so FarmerProfile mapping can stay farm-centric.
-    players_by_farm: Dict[str, List[dict]] = {}
-    for player in players:
-        farm_id = str(player.get("farmId") or "")
-        players_by_farm.setdefault(farm_id, []).append(player)
-    farms_with_players = [
-        {
-            **farm,
-            "players": players_by_farm.get(str(farm.get("farmId") or ""), []),
-        }
-        for farm in farms
-    ]
     farmer_profiles = build_farmer_profiles(
-        farms_with_players,
+        farms=farms,
+        players=players,
         server_name=server.name,
-        economy=economy,
     )
 
     # Smart sync and publish FarmerProfile entities only.
@@ -201,41 +189,43 @@ def _sync(
 
 def build_farmer_profiles(
     farms: List[dict],
+    players: List[dict],
     server_name: str,
-    economy: Optional[dict] = None,
 ) -> List[dict]:
     """
     Build one FarmerProfile record per player from farm-oriented source data.
     """
     profiles: List[dict] = []
 
-    for farm in farms:
-        farm_name = farm.get("farmName") or farm.get("name") or ""
-        money = farm.get("balance") if farm.get("balance") is not None else farm.get("money")
-        loan = farm.get("loan", 0)
-        farm_players = farm.get("players") or []
+    farms_by_id: Dict[str, dict] = {
+        str(farm.get("farmId") or ""): farm for farm in farms
+    }
 
-        for player in farm_players:
-            profile = {
-                "farm_name": farm_name,
-                "money": money,
-                "loan": loan,
-                "ingame_name": player.get("nickname") or player.get("name") or "",
-                "discord_id": str(player.get("uniqueUserId") or ""),
-                "playtime_hours": (
-                    (player.get("stats") or {}).get("playTime")
-                    if isinstance(player.get("stats"), dict)
-                    else player.get("playTime", 0)
-                ),
-                "notify_server": server_name,
-            }
+    for player in players:
+        farm_id = str(player.get("farmId") or "")
+        farm = farms_by_id.get(farm_id, {})
 
-            if economy:
-                profile["economy_income"] = economy.get("income")
-                profile["economy_expenses"] = economy.get("expenses")
+        profile = {
+            "farm_name": farm.get("farmName") or farm.get("name") or "",
+            "money": (
+                farm.get("balance")
+                if farm.get("balance") is not None
+                else farm.get("money")
+            ),
+            "loan": farm.get("loan", 0),
+            "ingame_name": player.get("nickname") or player.get("name") or "",
+            "discord_id": str(player.get("uniqueUserId") or ""),
+            "playtime_hours": (
+                (player.get("stats") or {}).get("playTime")
+                if isinstance(player.get("stats"), dict)
+                else player.get("playTime", 0)
+            ),
+            "notify_server": server_name,
+            "is_active": True,
+        }
 
-            if profile["discord_id"] and profile["ingame_name"]:
-                profiles.append(profile)
+        if profile["discord_id"] and profile["ingame_name"]:
+            profiles.append(profile)
 
     return profiles
 
@@ -274,6 +264,7 @@ def send_farmer_profiles(client: Base44Client, profiles: List[dict]) -> None:
                 ok = client.update_farmer_profile(str(entity_id), profile)
                 if ok:
                     logger.info("Update: discord_id=%s server=%s", key[0], key[1])
+                    print(f"[Update] {profile['ingame_name']} ({key[1]})")
                 else:
                     logger.error("Errors: update failed for discord_id=%s server=%s", key[0], key[1])
                 continue
@@ -281,6 +272,7 @@ def send_farmer_profiles(client: Base44Client, profiles: List[dict]) -> None:
             ok = client.create_farmer_profile(profile)
             if ok:
                 logger.info("Create: discord_id=%s server=%s", key[0], key[1])
+                print(f"[Create] {profile['ingame_name']} ({key[1]})")
             else:
                 logger.error("Errors: create failed for discord_id=%s server=%s", key[0], key[1])
         except Exception as exc:  # pragma: no cover - hard safety net
