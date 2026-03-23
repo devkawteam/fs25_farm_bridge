@@ -232,11 +232,14 @@ def _sync_to_base44(data: Dict[str, Any], api_key: str) -> None:
         # 2. Farms
         fl_by_owner = data.get("farmIdsFromFarmlands", {})
         for farm in data.get("farms", []):
-            fid = str(farm.get("farmId", ""))
-            fl_info = fl_by_owner.get(fid, {"area": 0.0, "count": 0})
-            farm_key = f"{server_name}::farm::{fid}"
-            _upsert(session, "Farm", "farmId", farm_key, {
-                "farmId": farm_key,
+            fid = farm.get("farmId")
+            try:
+                fid_num = int(fid)
+            except (TypeError, ValueError):
+                continue
+            fl_info = fl_by_owner.get(str(fid_num), {"area": 0.0, "count": 0})
+            _upsert(session, "Farm", "farmId", fid_num, {
+                "farmId": fid_num,
                 "farmName": farm.get("farmName", ""),
                 "balance": farm.get("balance", 0),
                 "fieldCount": fl_info["count"],
