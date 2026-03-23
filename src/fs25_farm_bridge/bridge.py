@@ -24,7 +24,7 @@ _SERVER_FEEDS = {
 }
 
 # This agent app on Base44 — receives data from both servers
-_APP_ID = "69bd745a05c2dd67076e46de"
+_APP_ID = "69ac6dca5af2dc4d433b68bd"
 _BASE_URL = f"https://app.base44.com/api/apps/{_APP_ID}/entities"
 
 
@@ -315,4 +315,5 @@ def fetch_server_data(server_id: int) -> Dict[str, Any]:
     config = Config()
     server = config.get_servers(selected_server=server_id)[0]
     return _fetch_server_data(server, config.request_timeout, config.retry_attempts)
+
 
