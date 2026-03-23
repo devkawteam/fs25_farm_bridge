@@ -1,5 +1,6 @@
 import logging
 import os
+import json
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -26,6 +27,18 @@ BASE44_INGEST_URL = os.environ.get(
     "BASE44_API_URL",
     "https://kaws-agent-076e46de.base44.app/functions/farmIntelligenceIngest",
 )
+
+# ServerHub app direct API — same BASE44_API_KEY works for both apps
+_SERVERHUB_APP_ID = "69ac6dca5af2dc4d433b68bd"
+_SERVERHUB_ENTITY_URL = (
+    f"https://api.base44.com/api/apps/{_SERVERHUB_APP_ID}/entities/FS25SaveData"
+)
+
+# Playground name → playground ID mapping
+_PLAYGROUND_MAP = {
+    "kaw's farming playground 1": "pg1",
+    "kaw's farming playground 2": "pg2",
+}
 
 def _daytime_to_hhmm(day_time_ms: int) -> str:
     total_seconds = day_time_ms // 1000
@@ -70,7 +83,6 @@ def _parse_stats_xml(root: Any, server_name: str) -> Dict[str, Any]:
             "x": fl.get("x", "0"),
             "z": fl.get("z", "0"),
         })
-        # Accumulate area per farm for derived farm list
         if owner_id and owner_id != "0":
             if owner_id not in farm_ids_from_farmlands:
                 farm_ids_from_farmlands[owner_id] = {"area": 0.0, "count": 0}
@@ -129,8 +141,7 @@ def _parse_stats_xml(root: Any, server_name: str) -> Dict[str, Any]:
 
 
 def _parse_career_xml(root: Any, farm_ids_hint: Dict = None) -> List[Dict]:
-    """Parse careerSavegame for farm data. Falls back to deriving from farmland ownership."""
-    # Try direct farm elements first (lowercase, as in some versions)
+    """Parse careerSavegame for farm data."""
     farms = []
     for farm_el in root.findall(".//farm"):
         farms.append({
@@ -145,7 +156,6 @@ def _parse_career_xml(root: Any, farm_ids_hint: Dict = None) -> List[Dict]:
     if farms:
         return farms
 
-    # No direct farm data — derive from farmland ownership
     if farm_ids_hint:
         for fid, info in sorted(farm_ids_hint.items()):
             farms.append({
@@ -239,6 +249,149 @@ def _send_to_base44(data: Dict[str, Any]) -> bool:
         raise
 
 
+def _update_server_hub(data: Dict[str, Any], api_key: str) -> bool:
+    """
+    Write/update FS25SaveData in the ServerHub app (kawsplayground.online).
+    Uses the base44 REST API directly with BASE44_API_KEY.
+    """
+    import datetime
+
+    server_name = (data.get("serverName") or "").lower()
+    playground = _PLAYGROUND_MAP.get(server_name)
+    if not playground:
+        print(f"[HUB] Unknown server name '{server_name}', skipping ServerHub update.")
+        return False
+
+    session = requests.Session()
+    session.headers.update({
+        "api_key": api_key,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    })
+
+    try:
+        # 1. Find existing record
+        resp = session.get(
+            _SERVERHUB_ENTITY_URL,
+            params={"playground": playground},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        records = payload if isinstance(payload, list) else payload.get("records", [])
+        record_id = records[0]["id"] if records else None
+
+        # 2. Build crop prices list
+        crop_prices = []
+        economy = data.get("economy", {})
+        if economy.get("cropPrices"):
+            for crop, info in economy["cropPrices"].items():
+                history = info.get("priceHistory", {})
+                price_per_liter = next(iter(history.values()), 0)
+                price_ton = round(price_per_liter * 1000)
+                if price_ton > 0:
+                    crop_prices.append({"name": crop, "price": price_ton, "factor": 1})
+
+        # 3. Build farms list with farmland stats
+        farmlands = data.get("farmlands", [])
+        farmland_by_owner: Dict[str, Dict] = {}
+        for fl in farmlands:
+            owner = str(fl.get("owner", "0"))
+            if owner and owner != "0":
+                if owner not in farmland_by_owner:
+                    farmland_by_owner[owner] = {"area": 0.0, "count": 0}
+                farmland_by_owner[owner]["area"] += float(fl.get("area", 0) or 0)
+                farmland_by_owner[owner]["count"] += 1
+
+        hub_farms = []
+        for farm in data.get("farms", []):
+            fid = str(farm.get("farmId", ""))
+            fl_info = farmland_by_owner.get(fid, {"area": 0.0, "count": 0})
+            hub_farms.append({
+                "farm_id": fid,
+                "farm_name": farm.get("farmName", f"Farm {fid}"),
+                "balance": farm.get("balance", 0),
+                "loan": farm.get("loan", 0),
+                "total_area_ha": round(fl_info["area"], 2),
+                "farmland_count": fl_info["count"],
+            })
+
+        # 4. Build vehicles list
+        hub_vehicles = []
+        for idx, v in enumerate(data.get("vehicles", [])[:100]):
+            loc = (v.get("location") or "0,0").split(",")
+            hub_vehicles.append({
+                "vehicle_id": str(idx + 1),
+                "farm_id": "0",
+                "type_name": v.get("vehicleName", ""),
+                "category": (v.get("category") or "").lower(),
+                "damage": 0,
+                "wear": 0,
+                "pos_x": float(loc[0]) if loc else 0.0,
+                "pos_z": float(loc[1]) if len(loc) > 1 else 0.0,
+                "needs_repair": False,
+            })
+
+        # 5. Map URL
+        map_url = (
+            "http://144.126.158.162:9120/feed/dedicated-server-stats-map.jpg?code=mt3bqE0kBPlcS8Ld&quality=60&size=512"
+            if playground == "pg1"
+            else "http://144.126.153.108:9110/feed/dedicated-server-stats-map.jpg?code=Axa2ixzvN7Gj8bQ3&quality=60&size=512"
+        )
+
+        env = data.get("environment", {})
+        hub_data = {
+            "playground": playground,
+            "server_online": True,
+            "server_name": data.get("map", ""),
+            "map_name": data.get("map", ""),
+            "map_url": map_url,
+            "in_game_time": env.get("currentTime", ""),
+            "ingame_day": env.get("currentDay") or None,
+            "ingame_season": env.get("season") or None,
+            "player_count": len(data.get("players", [])),
+            "online_players": [
+                {"name": p.get("name"), "uptime": p.get("uptime"), "isAdmin": p.get("isAdmin")}
+                for p in data.get("players", [])
+            ],
+            "vehicle_count": len(data.get("vehicles", [])),
+            "vehicles": hub_vehicles,
+            "field_count": len(data.get("fields", [])),
+            "farm_count": len(hub_farms),
+            "farms": hub_farms,
+            "crop_prices": crop_prices,
+            "synced_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "sync_status": "ok",
+        }
+
+        # 6. Update or create
+        if record_id:
+            resp2 = session.put(
+                f"{_SERVERHUB_ENTITY_URL}/{record_id}",
+                json=hub_data,
+                timeout=15,
+            )
+            resp2.raise_for_status()
+            print(f"[HUB] ✓ Updated FS25SaveData ({playground}) in ServerHub")
+        else:
+            resp2 = session.post(
+                _SERVERHUB_ENTITY_URL,
+                json=hub_data,
+                timeout=15,
+            )
+            resp2.raise_for_status()
+            print(f"[HUB] ✓ Created FS25SaveData ({playground}) in ServerHub")
+
+        return True
+
+    except Exception as exc:
+        print(f"[HUB] ✗ Failed to update ServerHub ({playground}): {exc}")
+        logger.error("ServerHub update failed: %s", exc)
+        return False
+    finally:
+        session.close()
+
+
 def run(selected_server: Optional[int] = None, run_all: bool = False) -> None:
     config = Config()
     servers = config.get_servers(selected_server=selected_server, run_all=run_all)
@@ -261,7 +414,12 @@ def run(selected_server: Optional[int] = None, run_all: bool = False) -> None:
         print(f"  Farmlands: {len(data.get('farmlands', []))}")
         print(f"  Players online: {data.get('playersOnline', 0)}")
 
+        # Send to FarmSim monitoring app ingest function
         _send_to_base44(data)
+
+        # Also update kawsplayground.online ServerHub (FS25SaveData)
+        _update_server_hub(data, server.base44_api_key)
+
         logger.info("Done with server %s.", server.server_id)
 
 
