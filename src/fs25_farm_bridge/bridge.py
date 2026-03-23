@@ -1,31 +1,25 @@
 import logging
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .base44 import Base44Client
 from .config import Config, ServerConfig
 from .state import BridgeState
 from .utils import (
-    fetch_ftp_file,
+    fetch_http_xml,
     merge_data,
+    merge_by_key,
     parse_economy,
     parse_environment,
     parse_farms,
     parse_fields,
     parse_players,
-    parse_xml,
+    parse_server_name,
+    parse_vehicles,
 )
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# GPortal FTP paths — adjust to your server layout if needed
-# ---------------------------------------------------------------------------
-_DEDICATED_STATS = "/gameserver/dedicated_server_stats.xml"
-_CAREER_SAVEGAME = "/gameserver/savegame/careerSavegame.xml"
-_FARMS_FILE = "/gameserver/savegame/farms.xml"
-_FIELDS_FILE = "/gameserver/savegame/fields.xml"
-_ECONOMY_FILE = "/gameserver/savegame/economy.xml"
-_PLAYERS_FILE = "/gameserver/savegame/serverPlayers.xml"
+_SAVEGAME_FILES = ("careerSavegame", "vehicles", "economy")
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +47,13 @@ def run(selected_server: Optional[int] = None, run_all: bool = False) -> None:
         )
 
         try:
-            _sync(server, state, client)
+            _sync(
+                server,
+                state,
+                client,
+                timeout=config.request_timeout,
+                retry_attempts=config.retry_attempts,
+            )
         finally:
             state.save()
             client.close()
@@ -63,76 +63,126 @@ def run(selected_server: Optional[int] = None, run_all: bool = False) -> None:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _fetch(server: ServerConfig, path: str) -> Optional[bytes]:
-    return fetch_ftp_file(
-        host=server.ftp_host,
-        port=server.ftp_port,
-        user=server.ftp_user,
-        password=server.ftp_pass,
-        path=path,
+def fetch_server_data(server_id: int) -> Dict[str, Any]:
+    """
+    Fetch and merge live + savegame XML data for one configured server.
+    """
+    config = Config()
+    server = config.get_servers(selected_server=server_id)[0]
+    return _fetch_server_data(server, config.request_timeout, config.retry_attempts)
+
+
+def _fetch_server_data(
+    server: ServerConfig,
+    timeout: int,
+    retry_attempts: int,
+) -> Dict[str, Any]:
+    live_root = fetch_http_xml(server.stats_feed_url, timeout=timeout, retry_attempts=retry_attempts)
+
+    live_data: Dict[str, Any] = {
+        "serverName": server.name,
+        "environment": {},
+        "players": [],
+        "farms": [],
+        "fields": [],
+        "vehicles": [],
+    }
+    if live_root is not None:
+        parsed_server_name = parse_server_name(live_root)
+        live_data = {
+            "serverName": parsed_server_name or server.name,
+            "environment": parse_environment(live_root),
+            "players": parse_players(live_root),
+            "farms": parse_farms(live_root),
+            "fields": parse_fields(live_root),
+            "vehicles": parse_vehicles(live_root),
+        }
+
+    savegame_roots: Dict[str, Any] = {}
+    for file_name in _SAVEGAME_FILES:
+        root = fetch_http_xml(
+            server.savegame_feed_url(file_name),
+            timeout=timeout,
+            retry_attempts=retry_attempts,
+        )
+        if root is not None:
+            savegame_roots[file_name] = root
+
+    career_root = savegame_roots.get("careerSavegame")
+    vehicles_root = savegame_roots.get("vehicles")
+    economy_root = savegame_roots.get("economy")
+
+    save_data = {
+        "environment": parse_environment(career_root) if career_root is not None else {},
+        "players": parse_players(career_root) if career_root is not None else [],
+        "farms": parse_farms(career_root) if career_root is not None else [],
+        "fields": parse_fields(career_root) if career_root is not None else [],
+        "vehicles": parse_vehicles(vehicles_root) if vehicles_root is not None else [],
+        "economy": parse_economy(economy_root) if economy_root is not None else {},
+    }
+
+    return {
+        "serverName": live_data.get("serverName") or server.name,
+        "environment": merge_data(live_data["environment"], save_data["environment"]),
+        "players": merge_by_key(live_data["players"], save_data["players"], "uniqueUserId"),
+        "farms": merge_by_key(live_data["farms"], save_data["farms"], "farmId"),
+        "fields": merge_by_key(live_data["fields"], save_data["fields"], "fieldId"),
+        "vehicles": merge_by_key(live_data["vehicles"], save_data["vehicles"], "vehicleId"),
+        "economy": save_data["economy"],
+    }
+
+
+def _sync(
+    server: ServerConfig,
+    state: BridgeState,
+    client: Base44Client,
+    timeout: int,
+    retry_attempts: int,
+) -> None:
+    """Fetch all data sources over HTTP, detect changes, and push updates to Base44."""
+
+    snapshot = _fetch_server_data(
+        server=server,
+        timeout=timeout,
+        retry_attempts=retry_attempts,
     )
 
-
-def _sync(server: ServerConfig, state: BridgeState, client: Base44Client) -> None:
-    """Fetch all data sources, detect changes, and push updates to Base44."""
-
-    # -- Environment (merge live stats + savegame) --
-    live_bytes = _fetch(server, _DEDICATED_STATS)
-    live_root = parse_xml(live_bytes) if live_bytes else None
-    live_env = parse_environment(live_root) if live_root is not None else {}
-
-    savegame_bytes = _fetch(server, _CAREER_SAVEGAME)
-    savegame_root = parse_xml(savegame_bytes) if savegame_bytes else None
-    savegame_env = parse_environment(savegame_root) if savegame_root is not None else {}
-
-    environment = merge_data(live_env, savegame_env)
+    environment = snapshot.get("environment", {})
     if environment:
         environment["serverId"] = server.server_id
-        environment["serverName"] = server.name
+        environment["serverName"] = snapshot.get("serverName") or server.name
 
-    # -- Farms --
-    farms_bytes = _fetch(server, _FARMS_FILE)
-    farms_root = parse_xml(farms_bytes) if farms_bytes else None
-    farms = parse_farms(farms_root) if farms_root is not None else []
+    farms = snapshot.get("farms", [])
     farms = [
         {
             **farm,
             "serverId": server.server_id,
-            "serverName": server.name,
+            "serverName": snapshot.get("serverName") or server.name,
         }
         for farm in farms
     ]
 
-    # -- Fields --
-    fields_bytes = _fetch(server, _FIELDS_FILE)
-    fields_root = parse_xml(fields_bytes) if fields_bytes else None
-    fields = parse_fields(fields_root) if fields_root is not None else []
+    fields = snapshot.get("fields", [])
     fields = [
         {
             **field,
             "serverId": server.server_id,
-            "serverName": server.name,
+            "serverName": snapshot.get("serverName") or server.name,
         }
         for field in fields
     ]
 
-    # -- Economy --
-    economy_bytes = _fetch(server, _ECONOMY_FILE)
-    economy_root = parse_xml(economy_bytes) if economy_bytes else None
-    economy = parse_economy(economy_root) if economy_root is not None else {}
+    economy = snapshot.get("economy", {})
     if economy:
         economy["serverId"] = server.server_id
-        economy["serverName"] = server.name
+        economy["serverName"] = snapshot.get("serverName") or server.name
 
-    # -- Players --
-    players_bytes = _fetch(server, _PLAYERS_FILE)
-    players_root = parse_xml(players_bytes) if players_bytes else None
-    players = parse_players(players_root) if players_root is not None else []
+    players = snapshot.get("players", [])
     players = [
         {
             **player,
             "serverId": server.server_id,
-            "serverName": server.name,
+            "serverName": snapshot.get("serverName") or server.name,
         }
         for player in players
     ]
