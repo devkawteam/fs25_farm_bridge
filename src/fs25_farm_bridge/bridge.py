@@ -25,7 +25,7 @@ _SERVER_FEEDS = {
 
 # This agent app on Base44 — receives data from both servers
 _APP_ID = "69bd745a05c2dd67076e46de"
-_BASE_URL = f"https://api.base44.com/api/apps/{_APP_ID}/entities"
+_BASE_URL = f"https://app.base44.com/api/apps/{_APP_ID}/entities"
 
 
 def _daytime_to_hhmm(day_time_ms: int) -> str:
@@ -315,3 +315,4 @@ def fetch_server_data(server_id: int) -> Dict[str, Any]:
     config = Config()
     server = config.get_servers(selected_server=server_id)[0]
     return _fetch_server_data(server, config.request_timeout, config.retry_attempts)
+
