@@ -1,35 +1,48 @@
-import ftplib
-import io
 import logging
+import time
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional
+
+import requests
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# FTP
+# HTTP
 # ---------------------------------------------------------------------------
 
-def fetch_ftp_file(
-    host: str,
-    port: int,
-    user: str,
-    password: str,
-    path: str,
-) -> Optional[bytes]:
-    """Download a single file from an FTP server. Returns raw bytes or None."""
-    try:
-        with ftplib.FTP() as ftp:
-            ftp.connect(host, port, timeout=30)
-            ftp.login(user, password)
-            buf = io.BytesIO()
-            ftp.retrbinary(f"RETR {path}", buf.write)
-            logger.debug("FTP: fetched '%s' (%d bytes)", path, buf.tell())
-            return buf.getvalue()
-    except ftplib.all_errors as exc:
-        logger.error("FTP error fetching '%s': %s", path, exc)
-        return None
+def fetch_http_xml(
+    url: str,
+    timeout: int = 15,
+    retry_attempts: int = 3,
+) -> Optional[ET.Element]:
+    """Fetch an XML document over HTTP and return its root element."""
+    for attempt in range(1, retry_attempts + 1):
+        try:
+            response = requests.get(url, timeout=timeout)
+            logger.info("GET %s -> %s", url, response.status_code)
+            response.raise_for_status()
+            root = parse_xml(response.content)
+            if root is None:
+                logger.error("HTTP XML parse failure for %s", url)
+            return root
+        except requests.exceptions.Timeout:
+            logger.warning("HTTP timeout for %s on attempt %d/%d", url, attempt, retry_attempts)
+        except requests.exceptions.RequestException as exc:
+            logger.warning(
+                "HTTP request error for %s on attempt %d/%d: %s",
+                url,
+                attempt,
+                retry_attempts,
+                exc,
+            )
+
+        if attempt < retry_attempts:
+            time.sleep(2**attempt)
+
+    logger.error("Exhausted retries while fetching %s", url)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +135,7 @@ def parse_economy(root: ET.Element) -> Dict[str, Any]:
 def parse_players(root: ET.Element) -> List[Dict[str, Any]]:
     players = []
     for player_el in root.findall(".//player"):
-        nickname = player_el.get("lastNickname", "")
+        nickname = player_el.get("nickname", player_el.get("lastNickname", ""))
         play_time = player_el.get("playTime", player_el.get("playTimeHours", "0"))
         players.append(
             {
@@ -136,6 +149,52 @@ def parse_players(root: ET.Element) -> List[Dict[str, Any]]:
             }
         )
     return players
+
+
+def parse_vehicles(root: ET.Element) -> List[Dict[str, Any]]:
+    vehicles: List[Dict[str, Any]] = []
+    for vehicle_el in root.findall(".//vehicle"):
+        vehicles.append(
+            {
+                "vehicleId": vehicle_el.get("id", ""),
+                "farmId": vehicle_el.get("farmId", ""),
+                "name": vehicle_el.get("filename", vehicle_el.get("name", "")),
+                "operatingTime": vehicle_el.get("operatingTime", "0"),
+            }
+        )
+    return vehicles
+
+
+def parse_server_name(root: ET.Element) -> str:
+    server_el = root.find(".//server")
+    if server_el is not None:
+        return server_el.get("name", server_el.get("serverName", ""))
+    return root.get("serverName", "")
+
+
+def merge_by_key(
+    live_items: List[Dict[str, Any]],
+    save_items: List[Dict[str, Any]],
+    key: str,
+) -> List[Dict[str, Any]]:
+    """Merge list entities by key with live data taking precedence."""
+    merged: Dict[str, Dict[str, Any]] = {}
+
+    for item in save_items:
+        item_key = str(item.get(key) or "")
+        if item_key:
+            merged[item_key] = dict(item)
+
+    for item in live_items:
+        item_key = str(item.get(key) or "")
+        if not item_key:
+            continue
+        if item_key in merged:
+            merged[item_key] = merge_data(item, merged[item_key])
+        else:
+            merged[item_key] = dict(item)
+
+    return list(merged.values())
 
 
 # ---------------------------------------------------------------------------

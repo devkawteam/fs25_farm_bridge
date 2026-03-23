@@ -7,23 +7,36 @@ DEFAULT_BASE44_API_URL = (
     "https://api.base44.com/api/apps/69ac6dca5af2dc4d433b68bd/entities/FarmerProfile"
 )
 
+DEFAULT_FEED_BASE_URL_1 = "http://144.126.158.162:9120/feed"
+DEFAULT_FEED_CODE_1 = "mt3bqE0kBPlcS8Ld"
+DEFAULT_FEED_BASE_URL_2 = "http://144.126.153.108:9110/feed"
+DEFAULT_FEED_CODE_2 = "Axa2ixzvN7Gj8bQ3"
+
 
 @dataclass(frozen=True)
 class ServerConfig:
     server_id: int
     name: str
-    ftp_host: str
-    ftp_port: int
-    ftp_user: str
-    ftp_pass: str
+    feed_base_url: str
+    feed_code: str
     base44_api_url: str
     base44_api_key: str
     cache_file: str
 
+    @property
+    def stats_feed_url(self) -> str:
+        return f"{self.feed_base_url}/dedicated-server-stats.xml?code={self.feed_code}"
+
+    def savegame_feed_url(self, file_name: str) -> str:
+        return (
+            f"{self.feed_base_url}/dedicated-server-savegame.html"
+            f"?code={self.feed_code}&file={file_name}"
+        )
+
 
 class Config:
     """
-    Reads runtime settings for a strict multi-server setup (server 1 + 2).
+    Reads runtime settings for a strict HTTP-feed multi-server setup.
     Raises EnvironmentError on startup if any required variable is missing.
     """
 
@@ -65,10 +78,12 @@ class Config:
             raise EnvironmentError(f"Unsupported server_id '{server_id}'. Use 1 or 2.")
 
         suffix = str(server_id)
-        ftp_host = self._require(f"GPORTAL_FTP_HOST_{suffix}")
-        ftp_port = int(os.environ.get(f"GPORTAL_FTP_PORT_{suffix}", "51061"))
-        ftp_user = self._require(f"GPORTAL_FTP_USER_{suffix}")
-        ftp_pass = self._require(f"GPORTAL_FTP_PASS_{suffix}")
+        feed_base_default = (
+            DEFAULT_FEED_BASE_URL_1 if server_id == 1 else DEFAULT_FEED_BASE_URL_2
+        )
+        feed_code_default = DEFAULT_FEED_CODE_1 if server_id == 1 else DEFAULT_FEED_CODE_2
+        feed_base_url = os.environ.get(f"FS25_FEED_BASE_URL_{suffix}", feed_base_default)
+        feed_code = os.environ.get(f"FS25_FEED_CODE_{suffix}", feed_code_default)
 
         default_name = (
             "KAW's farming playground 1"
@@ -86,10 +101,8 @@ class Config:
         return ServerConfig(
             server_id=server_id,
             name=server_name,
-            ftp_host=ftp_host,
-            ftp_port=ftp_port,
-            ftp_user=ftp_user,
-            ftp_pass=ftp_pass,
+            feed_base_url=feed_base_url.rstrip("/"),
+            feed_code=feed_code,
             base44_api_url=base44_api_url,
             base44_api_key=base44_api_key,
             cache_file=cache_file,
