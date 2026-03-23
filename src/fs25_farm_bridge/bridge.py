@@ -1,9 +1,11 @@
 import logging
+import os
+import time
 from typing import Any, Dict, List, Optional
 
-from .base44 import Base44Client
+import requests
+
 from .config import Config, ServerConfig
-from .state import BridgeState
 from fs25_farm_bridge.utils import (
     fetch_http_xml,
     parse_economy,
@@ -31,272 +33,110 @@ _SERVER_FEEDS = {
     },
 }
 
-
-# ---------------------------------------------------------------------------
-# Public entry point
-# ---------------------------------------------------------------------------
-
-def run(selected_server: Optional[int] = None, run_all: bool = False) -> None:
-    """Top-level bridge run: fetch → parse → diff → publish."""
-    config = Config()
-    servers = config.get_servers(selected_server=selected_server, run_all=run_all)
-
-    for server in servers:
-        logger.info(
-            "Starting sync for server %s (%s)",
-            server.server_id,
-            server.name,
-        )
-
-        state = BridgeState(server.cache_file)
-        client = Base44Client(
-            api_url=server.base44_api_url,
-            api_key=server.base44_api_key,
-            timeout=config.request_timeout,
-            retry_attempts=config.retry_attempts,
-        )
-
-        try:
-            _sync(
-                server,
-                state,
-                client,
-                timeout=config.request_timeout,
-                retry_attempts=config.retry_attempts,
-            )
-        finally:
-            state.save()
-            client.close()
+BASE44_INGEST_URL = os.environ.get(
+    "BASE44_API_URL",
+    "https://kaws-agent-076e46de.base44.app/functions/farmIntelligenceIngest",
+)
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def fetch_server_data(server_id: int) -> Dict[str, Any]:
-    """
-    Fetch and merge live + savegame XML data for one configured server.
-    """
-    config = Config()
-    server = config.get_servers(selected_server=server_id)[0]
-    return _fetch_server_data(server, config.request_timeout, config.retry_attempts)
-
-
-def _fetch_server_data(
-    server: ServerConfig,
-    timeout: int,
-    retry_attempts: int,
-) -> Dict[str, Any]:
+def _fetch_server_data(server: ServerConfig, timeout: int, retry_attempts: int) -> Dict[str, Any]:
     urls = _SERVER_FEEDS.get(server.server_id)
     if urls is None:
         logger.error("No HTTP feed mapping for server_id=%s", server.server_id)
-        return {
-            "serverName": server.name,
-            "environment": {},
-            "players": [],
-            "farms": [],
-            "fields": [],
-            "vehicles": [],
-            "economy": {},
-        }
+        return {}
 
     stats_root = fetch_http_xml(urls["stats"], timeout=timeout, retry_attempts=retry_attempts)
     career_root = fetch_http_xml(urls["career"], timeout=timeout, retry_attempts=retry_attempts)
     economy_root = fetch_http_xml(urls["economy"], timeout=timeout, retry_attempts=retry_attempts)
     vehicles_root = fetch_http_xml(urls["vehicles"], timeout=timeout, retry_attempts=retry_attempts)
 
+    environment = parse_environment(stats_root) if stats_root is not None else {}
+    players_live = parse_players(stats_root) if stats_root is not None else []
+    farms = parse_farms(career_root) if career_root is not None else []
+    fields = parse_fields(career_root) if career_root is not None else []
+    vehicles = parse_vehicles(vehicles_root) if vehicles_root is not None else []
+    economy = parse_economy(economy_root) if economy_root is not None else {}
+
+    # Pull players online from stats feed Slots element
+    players_online = 0
+    player_slots = 10
+    if stats_root is not None:
+        slots_el = stats_root.find("Slots")
+        if slots_el is not None:
+            player_slots = int(slots_el.get("capacity", "10"))
+            players_online = int(slots_el.get("numUsed", "0"))
+
     return {
         "serverName": server.name,
-        "environment": parse_environment(stats_root) if stats_root is not None else {},
-        "players": parse_players(stats_root) if stats_root is not None else [],
-        "farms": parse_farms(career_root) if career_root is not None else [],
-        "fields": parse_fields(career_root) if career_root is not None else [],
-        "vehicles": parse_vehicles(vehicles_root) if vehicles_root is not None else [],
-        "economy": parse_economy(economy_root) if economy_root is not None else {},
+        "map": "",
+        "playersOnline": str(players_online),
+        "slots": str(player_slots),
+        "players": players_live,
+        "farms": farms,
+        "fields": fields,
+        "vehicles": vehicles,
+        "farmlands": [],
+        "environment": environment,
+        "economy": economy,
+        "serverId": server.server_id,
     }
 
 
-def _sync(
-    server: ServerConfig,
-    state: BridgeState,
-    client: Base44Client,
-    timeout: int,
-    retry_attempts: int,
-) -> None:
-    """Fetch all data sources over HTTP, detect changes, and push updates to Base44."""
-
-    snapshot = _fetch_server_data(
-        server=server,
-        timeout=timeout,
-        retry_attempts=retry_attempts,
-    )
-
-    environment = snapshot.get("environment", {})
-    if environment:
-        environment["serverId"] = server.server_id
-        environment["serverName"] = snapshot.get("serverName") or server.name
-
-    farms = snapshot.get("farms", [])
-    farms = [
-        {
-            **farm,
-            "serverId": server.server_id,
-            "serverName": snapshot.get("serverName") or server.name,
-        }
-        for farm in farms
-    ]
-
-    fields = snapshot.get("fields", [])
-    fields = [
-        {
-            **field,
-            "serverId": server.server_id,
-            "serverName": snapshot.get("serverName") or server.name,
-        }
-        for field in fields
-    ]
-
-    economy = snapshot.get("economy", {})
-    if economy:
-        economy["serverId"] = server.server_id
-        economy["serverName"] = snapshot.get("serverName") or server.name
-
-    players = snapshot.get("players", [])
-    players = [
-        {
-            **player,
-            "serverId": server.server_id,
-            "serverName": snapshot.get("serverName") or server.name,
-        }
-        for player in players
-    ]
-
-    farmer_profiles = build_farmer_profiles(
-        farms=farms,
-        players=players,
-        server_name=server.name,
-    )
-
-    # Smart sync and publish FarmerProfile entities only.
-    _publish_farmer_profiles(state, client, farmer_profiles)
-
-    logger.info(
-        "Bridge sync complete for server %s (%s).",
-        server.server_id,
-        server.name,
-    )
-
-
-def build_farmer_profiles(
-    farms: List[dict],
-    players: List[dict],
-    server_name: str,
-) -> List[dict]:
-    """
-    Build one FarmerProfile record per player from farm-oriented source data.
-    """
-    profiles: List[dict] = []
-
-    farms_by_id: Dict[str, dict] = {
-        str(farm.get("farmId") or ""): farm for farm in farms
-    }
-
-    for player in players:
-        farm_id = str(player.get("farmId") or "")
-        farm = farms_by_id.get(farm_id, {})
-
-        profile = {
-            "farm_name": farm.get("farmName") or farm.get("name") or "",
-            "money": (
-                farm.get("balance")
-                if farm.get("balance") is not None
-                else farm.get("money")
-            ),
-            "loan": farm.get("loan", 0),
-            "ingame_name": player.get("nickname") or player.get("name") or "",
-            "discord_id": str(player.get("uniqueUserId") or ""),
-            "playtime_hours": (
-                (player.get("stats") or {}).get("playTime")
-                if isinstance(player.get("stats"), dict)
-                else player.get("playTime", 0)
-            ),
-            "notify_server": server_name,
-            "is_active": True,
-        }
-
-        if profile["discord_id"] and profile["ingame_name"]:
-            profiles.append(profile)
-
-    return profiles
-
-
-def send_farmer_profiles(client: Base44Client, profiles: List[dict]) -> None:
-    """
-    Upsert FarmerProfile entities by (discord_id, notify_server).
-    """
+def _send_to_base44(data: Dict[str, Any]) -> bool:
+    url = BASE44_INGEST_URL
+    logger.info("Sending data for server '%s' to Base44 ingest...", data.get("serverName"))
     try:
-        existing_profiles = client.get_farmer_profiles()
-    except Exception as exc:  # pragma: no cover - hard safety net
-        logger.error("Errors fetching FarmerProfile entities: %s", exc)
-        return
+        response = requests.post(
+            url,
+            json=data,
+            headers={"Content-Type": "application/json"},
+            timeout=300,
+        )
+        logger.info("Response: %s", response.status_code)
+        if response.ok:
+            logger.info("Ingest result: %s", response.json())
+            print(f"[OK] Server '{data.get('serverName')}' synced: {response.json()}")
+            return True
+        else:
+            logger.error("Ingest failed: %s %s", response.status_code, response.text[:300])
+            print(f"[ERROR] Server '{data.get('serverName')}': {response.status_code} {response.text[:200]}")
+            return False
+    except Exception as exc:
+        logger.error("Request to Base44 failed: %s", exc)
+        print(f"[ERROR] Request failed: {exc}")
+        return False
 
-    index: Dict[tuple, dict] = {}
-    for item in existing_profiles:
-        key = (str(item.get("discord_id") or ""), str(item.get("notify_server") or ""))
-        if key[0] and key[1]:
-            index[key] = item
 
-    for profile in profiles:
-        key = (str(profile.get("discord_id") or ""), str(profile.get("notify_server") or ""))
-        if not key[0] or not key[1]:
-            logger.error("Errors: skipping profile with missing identity fields: %s", profile)
-            continue
+def run(selected_server: Optional[int] = None, run_all: bool = False) -> None:
+    """Top-level bridge run: fetch → parse → push to Base44."""
+    config = Config()
+    servers = config.get_servers(selected_server=selected_server, run_all=run_all)
 
-        existing = index.get(key)
-        entity_id = (
-            (existing or {}).get("id")
-            or (existing or {}).get("_id")
-            or (existing or {}).get("entityId")
+    for server in servers:
+        logger.info("Starting sync for server %s (%s)", server.server_id, server.name)
+        print(f"\n--- Syncing Server {server.server_id}: {server.name} ---")
+
+        data = _fetch_server_data(
+            server=server,
+            timeout=config.request_timeout,
+            retry_attempts=config.retry_attempts,
         )
 
-        try:
-            if entity_id:
-                ok = client.update_farmer_profile(str(entity_id), profile)
-                if ok:
-                    logger.info("Update: discord_id=%s server=%s", key[0], key[1])
-                    print(f"[Update] {profile['ingame_name']} ({key[1]})")
-                else:
-                    logger.error("Errors: update failed for discord_id=%s server=%s", key[0], key[1])
-                continue
-
-            ok = client.create_farmer_profile(profile)
-            if ok:
-                logger.info("Create: discord_id=%s server=%s", key[0], key[1])
-                print(f"[Create] {profile['ingame_name']} ({key[1]})")
-            else:
-                logger.error("Errors: create failed for discord_id=%s server=%s", key[0], key[1])
-        except Exception as exc:  # pragma: no cover - hard safety net
-            logger.error("Errors sending FarmerProfile for discord_id=%s: %s", key[0], exc)
-
-
-def _publish_farmer_profiles(
-    state: BridgeState,
-    client: Base44Client,
-    farmer_profiles: List[dict],
-) -> None:
-    changed_profiles: List[dict] = []
-
-    for profile in farmer_profiles:
-        key = profile.get("discord_id")
-        server = profile.get("notify_server")
-        if not key or not server:
+        if not data:
+            print(f"[SKIP] No data fetched for server {server.server_id}")
             continue
-        if state.has_changed(f"farmer_profile_{server}_{key}", profile):
-            changed_profiles.append(profile)
 
-    if not changed_profiles:
-        logger.debug("Farmer profiles unchanged — skipped.")
-        return
+        print(f"  Farms: {len(data.get('farms', []))}")
+        print(f"  Fields: {len(data.get('fields', []))}")
+        print(f"  Vehicles: {len(data.get('vehicles', []))}")
+        print(f"  Players online: {data.get('playersOnline', 0)}")
 
-    logger.info("%d FarmerProfile record(s) changed — syncing.", len(changed_profiles))
-    send_farmer_profiles(client, changed_profiles)
+        _send_to_base44(data)
+        logger.info("Done with server %s.", server.server_id)
+
+
+# Keep this so any remaining imports of fetch_server_data still work
+def fetch_server_data(server_id: int) -> Dict[str, Any]:
+    config = Config()
+    server = config.get_servers(selected_server=server_id)[0]
+    return _fetch_server_data(server, config.request_timeout, config.retry_attempts)
