@@ -23,15 +23,9 @@ _SERVER_FEEDS = {
     },
 }
 
-# ServerHub app (kawsplayground.online) - single destination
-_APP_ID = "69ac6dca5af2dc4d433b68bd"
+# This agent app on Base44 — receives data from both servers
+_APP_ID = "69bd745a05c2dd67076e46de"
 _BASE_URL = f"https://api.base44.com/api/apps/{_APP_ID}/entities"
-
-# Map server_id -> playground label used in serverName field
-_SERVER_NAMES = {
-    1: "KAW's farming playground 1",
-    2: "KAW's farming playground 2",
-}
 
 
 def _daytime_to_hhmm(day_time_ms: int) -> str:
@@ -52,7 +46,6 @@ def _api_session(api_key: str) -> requests.Session:
 
 
 def _upsert(session: requests.Session, entity: str, query_field: str, query_val: str, data: dict) -> bool:
-    """Find record by query_field=query_val, update if exists, create if not."""
     try:
         resp = session.get(f"{_BASE_URL}/{entity}", params={query_field: query_val}, timeout=15)
         resp.raise_for_status()
@@ -75,9 +68,8 @@ def _upsert(session: requests.Session, entity: str, query_field: str, query_val:
 
 
 def _bulk_replace(session: requests.Session, entity: str, server_name: str, records: list) -> None:
-    """Delete all records for this server, then bulk insert new ones."""
     try:
-        # Fetch existing IDs for this server
+        # Fetch and delete existing records for this server
         resp = session.get(f"{_BASE_URL}/{entity}", params={"serverName": server_name}, timeout=15)
         resp.raise_for_status()
         body = resp.json()
@@ -85,12 +77,14 @@ def _bulk_replace(session: requests.Session, entity: str, server_name: str, reco
         for rec in existing:
             session.delete(f"{_BASE_URL}/{entity}/{rec['id']}", timeout=10)
 
-        # Insert new records
+        # Insert new records in batches to avoid timeouts
         for rec in records:
             rec["serverName"] = server_name
-            session.post(f"{_BASE_URL}/{entity}", json=rec, timeout=10)
+            r = session.post(f"{_BASE_URL}/{entity}", json=rec, timeout=10)
+            if not r.ok:
+                logger.warning("Insert %s failed: %s", entity, r.status_code)
 
-        print(f"  [OK] Replaced {entity}: {len(records)} records")
+        print(f"  [OK] Replaced {entity}: {len(records)} records for {server_name}")
     except Exception as e:
         print(f"  [ERR] Bulk replace {entity}: {e}")
         logger.error("Bulk replace %s failed: %s", entity, e)
@@ -100,7 +94,6 @@ def _parse_stats_xml(root: Any, server_name: str) -> Dict[str, Any]:
     map_name = root.get("mapName", "")
     day_time_ms = int(root.get("dayTime", "0"))
     current_time = _daytime_to_hhmm(day_time_ms)
-    current_day = int(root.get("dayLight", "1") or "1")
 
     slots_el = root.find("Slots")
     players_online = 0
@@ -126,9 +119,6 @@ def _parse_stats_xml(root: Any, server_name: str) -> Dict[str, Any]:
             "name": fl.get("name", ""),
             "owner": owner_id,
             "area": fl.get("area", "0"),
-            "price": fl.get("price", "0"),
-            "x": fl.get("x", "0"),
-            "z": fl.get("z", "0"),
         })
         if owner_id and owner_id != "0":
             if owner_id not in farm_ids_from_farmlands:
@@ -141,12 +131,14 @@ def _parse_stats_xml(root: Any, server_name: str) -> Dict[str, Any]:
         fields.append({
             "fieldId": f.get("id", ""),
             "fruitType": f.get("fruitType", ""),
-            "growthState": f.get("growthState", "0"),
+            "growthState": int(f.get("growthState", "0") or "0"),
             "isOwned": f.get("isOwned", "false") == "true",
-            "weedState": f.get("weedFactor", "0"),
-            "sprayLevel": f.get("sprayLevel", "0"),
-            "limeLevel": f.get("limeLevel", "0"),
-            "plowLevel": f.get("plowLevel", "0"),
+            "weedState": float(f.get("weedFactor", "0") or "0"),
+            "sprayLevel": float(f.get("sprayLevel", "0") or "0"),
+            "limeLevel": float(f.get("limeLevel", "0") or "0"),
+            "plowLevel": float(f.get("plowLevel", "0") or "0"),
+            "harvestReady": int(f.get("growthState", "0") or "0") >= 6,
+            "needsAttention": float(f.get("weedFactor", "0") or "0") > 0.5,
             "assignedFarm": f.get("ownedByFarmId", ""),
         })
 
@@ -156,11 +148,11 @@ def _parse_stats_xml(root: Any, server_name: str) -> Dict[str, Any]:
             "vehicleName": v.get("name", ""),
             "vehicleType": v.get("type", ""),
             "category": v.get("category", ""),
+            "status": "active" if v.get("controllerName") else "idle",
             "operator": v.get("controllerName", ""),
             "fillTypes": v.get("fillTypes", ""),
             "fillLevels": v.get("fillLevels", ""),
             "location": f"{v.get('x','0')},{v.get('z','0')}",
-            "status": "active" if v.get("controllerName") else "idle",
         })
 
     return {
@@ -168,7 +160,6 @@ def _parse_stats_xml(root: Any, server_name: str) -> Dict[str, Any]:
         "mapName": map_name,
         "playersOnline": players_online,
         "playerSlots": player_slots,
-        "currentDay": current_day,
         "currentTime": current_time,
         "players": players_list,
         "farmlands": farmlands,
@@ -200,31 +191,6 @@ def _parse_career_xml(root: Any, farm_ids_hint: Dict = None) -> List[Dict]:
     return farms
 
 
-def _parse_economy_xml(root: Any) -> List[Dict]:
-    prices = []
-    for fill_el in root.findall(".//fillType"):
-        crop = fill_el.get("fillType", "")
-        if not crop or crop == "UNKNOWN":
-            continue
-        history: Dict[str, float] = {}
-        for p in fill_el.findall(".//period"):
-            pname = p.get("period", "")
-            val = float(p.get("value", "0") or "0")
-            if pname:
-                history[pname] = val
-        if history:
-            price_per_liter = next(iter(history.values()), 0)
-            price_ton = round(price_per_liter * 1000)
-            if price_ton > 0:
-                prices.append({
-                    "crop_type": crop,
-                    "price_per_liter": price_per_liter,
-                    "price_per_ton": price_ton,
-                    "recorded_date": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-                })
-    return prices
-
-
 def _fetch_server_data(server: ServerConfig, timeout: int, retry_attempts: int) -> Dict[str, Any]:
     urls = _SERVER_FEEDS.get(server.server_id)
     if urls is None:
@@ -233,7 +199,6 @@ def _fetch_server_data(server: ServerConfig, timeout: int, retry_attempts: int) 
 
     stats_root = fetch_http_xml(urls["stats"], timeout=timeout, retry_attempts=retry_attempts)
     career_root = fetch_http_xml(urls["career"], timeout=timeout, retry_attempts=retry_attempts)
-    economy_root = fetch_http_xml(urls["economy"], timeout=timeout, retry_attempts=retry_attempts)
 
     if stats_root is None:
         logger.error("Stats feed unavailable for server %s", server.server_id)
@@ -244,69 +209,64 @@ def _fetch_server_data(server: ServerConfig, timeout: int, retry_attempts: int) 
 
     farms = _parse_career_xml(career_root, farm_ids_hint) if career_root is not None else []
     payload["farms"] = farms
-    payload["crop_prices"] = _parse_economy_xml(economy_root) if economy_root is not None else []
+    payload["farmIdsFromFarmlands"] = farm_ids_hint
 
     return payload
 
 
-def _sync_to_serverhub(data: Dict[str, Any], api_key: str) -> None:
-    """Write all server data to the ServerHub app entities."""
+def _sync_to_base44(data: Dict[str, Any], api_key: str) -> None:
     server_name = data.get("serverName", "")
     session = _api_session(api_key)
 
     try:
-        # 1. ServerStatus — one record per server
+        # 1. ServerStatus
         _upsert(session, "ServerStatus", "serverName", server_name, {
             "serverName": server_name,
             "mapName": data.get("mapName", ""),
             "playersOnline": data.get("playersOnline", 0),
             "playerSlots": data.get("playerSlots", 16),
-            "currentDay": data.get("currentDay", 0),
             "currentTime": data.get("currentTime", ""),
-            "season": "",
-            "currentWeather": "",
-            "timeSinceLastRain": 0,
-            "forecast": [],
+            "lastUpdated": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         })
 
-        # 2. Farms — one record per farm per server
+        # 2. Farms
+        fl_by_owner = data.get("farmIdsFromFarmlands", {})
         for farm in data.get("farms", []):
-            farm_key = f"{server_name}::farm::{farm['farmId']}"
+            fid = str(farm.get("farmId", ""))
+            fl_info = fl_by_owner.get(fid, {"area": 0.0, "count": 0})
+            farm_key = f"{server_name}::farm::{fid}"
             _upsert(session, "Farm", "farmId", farm_key, {
                 "farmId": farm_key,
                 "farmName": farm.get("farmName", ""),
                 "color": str(farm.get("color", "0")),
                 "balance": farm.get("balance", 0),
                 "loan": farm.get("loan", 0),
-                "players": [],
                 "serverName": server_name,
+                "workedHectares": round(fl_info["area"], 2),
+                "farmlandCount": fl_info["count"],
             })
 
-        # 3. Fields — bulk replace (too many to diff individually)
-        field_records = []
-        for f in data.get("fields", []):
-            field_records.append({
+        # 3. Fields (bulk replace — too many to diff)
+        _bulk_replace(session, "Field", server_name, [
+            {
                 "fieldId": f.get("fieldId", ""),
                 "fruitType": f.get("fruitType", ""),
-                "cropType": f.get("fruitType", ""),
-                "growthState": int(f.get("growthState", 0) or 0),
-                "groundType": "",
-                "harvestReady": int(f.get("growthState", 0) or 0) >= 6,
-                "weedState": float(f.get("weedState", 0) or 0),
-                "sprayLevel": float(f.get("sprayLevel", 0) or 0),
-                "limeLevel": float(f.get("limeLevel", 0) or 0),
-                "plowLevel": float(f.get("plowLevel", 0) or 0),
-                "needsAttention": float(f.get("weedState", 0) or 0) > 0.5,
+                "growthState": f.get("growthState", 0),
                 "isOwned": f.get("isOwned", False),
+                "harvestReady": f.get("harvestReady", False),
+                "weedState": f.get("weedState", 0),
+                "sprayLevel": f.get("sprayLevel", 0),
+                "limeLevel": f.get("limeLevel", 0),
+                "plowLevel": f.get("plowLevel", 0),
+                "needsAttention": f.get("needsAttention", False),
                 "assignedFarm": f.get("assignedFarm", ""),
-            })
-        _bulk_replace(session, "Field", server_name, field_records)
+            }
+            for f in data.get("fields", [])
+        ])
 
-        # 4. Vehicles — bulk replace
-        vehicle_records = []
-        for v in data.get("vehicles", [])[:150]:
-            loc = (v.get("location") or "0,0").split(",")
-            vehicle_records.append({
+        # 4. Vehicles (bulk replace — up to 150)
+        _bulk_replace(session, "Vehicle", server_name, [
+            {
                 "vehicleName": v.get("vehicleName", ""),
                 "vehicleType": v.get("vehicleType", ""),
                 "category": v.get("category", ""),
@@ -315,21 +275,11 @@ def _sync_to_serverhub(data: Dict[str, Any], api_key: str) -> None:
                 "fillTypes": v.get("fillTypes", ""),
                 "fillLevels": v.get("fillLevels", ""),
                 "location": v.get("location", ""),
-                "assignedFarm": "",
-            })
-        _bulk_replace(session, "Vehicle", server_name, vehicle_records)
+            }
+            for v in data.get("vehicles", [])[:150]
+        ])
 
-        # 5. PlayerActivity — log current online players
-        for player in data.get("players", []):
-            session.post(f"{_BASE_URL}/PlayerActivity", json={
-                "playerName": player.get("name", ""),
-                "activityType": "login",
-                "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "notes": f"uptime={player.get('uptime','0')} admin={player.get('isAdmin',False)} server={server_name}",
-                "serverName": server_name,
-            }, timeout=10)
-
-        print(f"\n✓ {server_name} synced to ServerHub.")
+        print(f"\n✓ {server_name} fully synced.")
 
     finally:
         session.close()
@@ -356,7 +306,7 @@ def run(selected_server: Optional[int] = None, run_all: bool = False) -> None:
         print(f"  Vehicles: {len(data.get('vehicles', []))}")
         print(f"  Players online: {data.get('playersOnline', 0)}")
 
-        _sync_to_serverhub(data, server.base44_api_key)
+        _sync_to_base44(data, server.base44_api_key)
 
         logger.info("Done with server %s.", server.server_id)
 
