@@ -8,33 +8,16 @@ on:
 jobs:
   sync_server_1:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Restore bridge state cache
-        uses: actions/cache@v4
-        with:
-          path: .cache/
-          key: ${{ runner.os }}-fs25-state-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}-s1
-          restore-keys: |
-            ${{ runner.os }}-fs25-state-${{ github.ref_name }}-
-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
-      - name: Log server run
-        run: echo "Running Server 1"
-
       - name: Run Server 1 sync
-        continue-on-error: true
         env:
+          BASE44_API_URL: ${{ secrets.BASE44_API_URL }}
           BASE44_API_KEY: ${{ secrets.BASE44_API_KEY }}
         run: PYTHONPATH=src python -m fs25_farm_bridge --server 1
 
@@ -42,32 +25,15 @@ jobs:
     runs-on: ubuntu-latest
     needs: sync_server_1
     if: always()
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Restore bridge state cache
-        uses: actions/cache@v4
-        with:
-          path: .cache/
-          key: ${{ runner.os }}-fs25-state-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}-s2
-          restore-keys: |
-            ${{ runner.os }}-fs25-state-${{ github.ref_name }}-
-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
-      - name: Log server run
-        run: echo "Running Server 2"
-
       - name: Run Server 2 sync
-        continue-on-error: true
         env:
+          BASE44_API_URL: ${{ secrets.BASE44_API_URL }}
           BASE44_API_KEY: ${{ secrets.BASE44_API_KEY }}
         run: PYTHONPATH=src python -m fs25_farm_bridge --server 2
