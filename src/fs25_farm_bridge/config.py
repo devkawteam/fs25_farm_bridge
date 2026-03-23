@@ -3,10 +3,6 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 
-DEFAULT_BASE44_API_URL = (
-    "https://api.base44.com/api/apps/69ac6dca5af2dc4d433b68bd/entities/FarmerProfile"
-)
-
 DEFAULT_FEED_BASE_URL_1 = "http://144.126.158.162:9120/feed"
 DEFAULT_FEED_CODE_1 = "mt3bqE0kBPlcS8Ld"
 DEFAULT_FEED_BASE_URL_2 = "http://144.126.153.108:9110/feed"
@@ -19,8 +15,7 @@ class ServerConfig:
     name: str
     feed_base_url: str
     feed_code: str
-    base44_api_url: str
-    base44_api_key: str
+    base44_api_key: str  # ServerHub API key
     cache_file: str
 
     @property
@@ -66,14 +61,15 @@ class Config:
         )
 
     def _load_servers(self) -> List[ServerConfig]:
-        base44_api_key = self._require("BASE44_API_KEY")
+        # SERVERHUB_API_KEY is the API key for the kawsplayground.online ServerHub app
+        serverhub_api_key = self._require("SERVERHUB_API_KEY")
 
         return [
-            self._load_server(server_id=1, base44_api_key=base44_api_key),
-            self._load_server(server_id=2, base44_api_key=base44_api_key),
+            self._load_server(server_id=1, serverhub_api_key=serverhub_api_key),
+            self._load_server(server_id=2, serverhub_api_key=serverhub_api_key),
         ]
 
-    def _load_server(self, server_id: int, base44_api_key: str) -> ServerConfig:
+    def _load_server(self, server_id: int, serverhub_api_key: str) -> ServerConfig:
         if server_id not in (1, 2):
             raise EnvironmentError(f"Unsupported server_id '{server_id}'. Use 1 or 2.")
 
@@ -91,20 +87,15 @@ class Config:
             else "KAW's farming playground 2"
         )
         server_name = os.environ.get(f"SERVER_NAME_{suffix}", default_name)
-
         cache_default = f".cache/server{server_id}_state.json"
         cache_file = os.environ.get(f"CACHE_FILE_{suffix}", cache_default)
-
-        # Keep URL configurable while defaulting to the FarmerProfile entity endpoint.
-        base44_api_url = os.environ.get("BASE44_API_URL", DEFAULT_BASE44_API_URL)
 
         return ServerConfig(
             server_id=server_id,
             name=server_name,
             feed_base_url=feed_base_url.rstrip("/"),
             feed_code=feed_code,
-            base44_api_url=base44_api_url,
-            base44_api_key=base44_api_key,
+            base44_api_key=serverhub_api_key,
             cache_file=cache_file,
         )
 
@@ -112,5 +103,5 @@ class Config:
     def _require(key: str) -> str:
         value = os.environ.get(key)
         if not value:
-            raise EnvironmentError(f"Missing {key}")
+            raise EnvironmentError(f"Missing required env var: {key}")
         return value
