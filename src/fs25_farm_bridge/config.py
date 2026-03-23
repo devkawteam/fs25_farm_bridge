@@ -3,6 +3,11 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 
+DEFAULT_BASE44_API_URL = (
+    "https://api.base44.com/api/apps/69ac6dca5af2dc4d433b68bd/entities/FarmerProfile"
+)
+
+
 @dataclass(frozen=True)
 class ServerConfig:
     server_id: int
@@ -18,7 +23,7 @@ class ServerConfig:
 
 class Config:
     """
-    Reads all required runtime settings from environment variables.
+    Reads runtime settings for a strict multi-server setup (server 1 + 2).
     Raises EnvironmentError on startup if any required variable is missing.
     """
 
@@ -48,91 +53,51 @@ class Config:
         )
 
     def _load_servers(self) -> List[ServerConfig]:
-        # Multi-server mode: *_1 / *_2 style variables.
-        if os.environ.get("GPORTAL_FTP_HOST_1"):
-            servers: List[ServerConfig] = []
-            for server_id in range(1, 10):
-                suffix = str(server_id)
-                host = os.environ.get(f"GPORTAL_FTP_HOST_{suffix}")
-                if not host:
-                    continue
+        base44_api_key = self._require("BASE44_API_KEY")
 
-                ftp_port = int(os.environ.get(f"GPORTAL_FTP_PORT_{suffix}", "51061"))
-                ftp_user = self._require(f"GPORTAL_FTP_USER_{suffix}")
-                ftp_pass = self._require(f"GPORTAL_FTP_PASS_{suffix}")
-
-                # Allow shared Base44 credentials when per-server keys are not set.
-                base44_api_url = os.environ.get(
-                    f"BASE44_API_URL_{suffix}", os.environ.get("BASE44_API_URL")
-                )
-                base44_api_key = os.environ.get(
-                    "BASE44_API_KEY", os.environ.get(f"BASE44_API_KEY_{suffix}")
-                )
-                if not base44_api_url:
-                    raise EnvironmentError(
-                        f"Required environment variable 'BASE44_API_URL_{suffix}' "
-                        "(or shared 'BASE44_API_URL') is not set."
-                    )
-                if not base44_api_key:
-                    raise EnvironmentError(
-                        f"Required environment variable 'BASE44_API_KEY_{suffix}' "
-                        "(or shared 'BASE44_API_KEY') is not set."
-                    )
-
-                servers.append(
-                    ServerConfig(
-                        server_id=server_id,
-                        name=os.environ.get(
-                            f"SERVER_NAME_{suffix}",
-                            (
-                                "KAW's farming playground 1"
-                                if server_id == 1
-                                else (
-                                    "KAW's farming playground 2"
-                                    if server_id == 2
-                                    else f"Farm Server {server_id}"
-                                )
-                            ),
-                        ),
-                        ftp_host=host,
-                        ftp_port=ftp_port,
-                        ftp_user=ftp_user,
-                        ftp_pass=ftp_pass,
-                        base44_api_url=base44_api_url,
-                        base44_api_key=base44_api_key,
-                        cache_file=os.environ.get(
-                            f"CACHE_FILE_{suffix}",
-                            f".cache/bridge_state_server{server_id}.json",
-                        ),
-                    )
-                )
-
-            if not servers:
-                raise EnvironmentError(
-                    "Multi-server mode detected, but no valid server configs found."
-                )
-            return servers
-
-        # Backward-compatible single-server mode.
         return [
-            ServerConfig(
-                server_id=1,
-                name=os.environ.get("SERVER_NAME", "Farm Server 1"),
-                ftp_host=self._require("GPORTAL_FTP_HOST"),
-                ftp_port=int(os.environ.get("GPORTAL_FTP_PORT", "51061")),
-                ftp_user=self._require("GPORTAL_FTP_USER"),
-                ftp_pass=self._require("GPORTAL_FTP_PASS"),
-                base44_api_url=self._require("BASE44_API_URL"),
-                base44_api_key=self._require("BASE44_API_KEY"),
-                cache_file=os.environ.get("CACHE_FILE", ".cache/bridge_state.json"),
-            )
+            self._load_server(server_id=1, base44_api_key=base44_api_key),
+            self._load_server(server_id=2, base44_api_key=base44_api_key),
         ]
+
+    def _load_server(self, server_id: int, base44_api_key: str) -> ServerConfig:
+        if server_id not in (1, 2):
+            raise EnvironmentError(f"Unsupported server_id '{server_id}'. Use 1 or 2.")
+
+        suffix = str(server_id)
+        ftp_host = self._require(f"GPORTAL_FTP_HOST_{suffix}")
+        ftp_port = int(os.environ.get(f"GPORTAL_FTP_PORT_{suffix}", "51061"))
+        ftp_user = self._require(f"GPORTAL_FTP_USER_{suffix}")
+        ftp_pass = self._require(f"GPORTAL_FTP_PASS_{suffix}")
+
+        default_name = (
+            "KAW's farming playground 1"
+            if server_id == 1
+            else "KAW's farming playground 2"
+        )
+        server_name = os.environ.get(f"SERVER_NAME_{suffix}", default_name)
+
+        cache_default = f".cache/server{server_id}_state.json"
+        cache_file = os.environ.get(f"CACHE_FILE_{suffix}", cache_default)
+
+        # Keep URL configurable while defaulting to the FarmerProfile entity endpoint.
+        base44_api_url = os.environ.get("BASE44_API_URL", DEFAULT_BASE44_API_URL)
+
+        return ServerConfig(
+            server_id=server_id,
+            name=server_name,
+            ftp_host=ftp_host,
+            ftp_port=ftp_port,
+            ftp_user=ftp_user,
+            ftp_pass=ftp_pass,
+            base44_api_url=base44_api_url,
+            base44_api_key=base44_api_key,
+            cache_file=cache_file,
+        )
 
     @staticmethod
     def _require(key: str) -> str:
         value = os.environ.get(key)
         if not value:
-            raise EnvironmentError(
-                f"Required environment variable '{key}' is not set."
-            )
+            raise EnvironmentError(f"Missing {key}")
         return value
