@@ -36,14 +36,6 @@ jobs:
         continue-on-error: true
         env:
           BASE44_API_KEY: ${{ secrets.BASE44_API_KEY }}
-          GPORTAL_FTP_HOST_1: ${{ secrets.GPORTAL_FTP_HOST_1 }}
-          GPORTAL_FTP_PORT_1: ${{ secrets.GPORTAL_FTP_PORT_1 }}
-          GPORTAL_FTP_USER_1: ${{ secrets.GPORTAL_FTP_USER_1 }}
-          GPORTAL_FTP_PASS_1: ${{ secrets.GPORTAL_FTP_PASS_1 }}
-          GPORTAL_FTP_HOST_2: ${{ secrets.GPORTAL_FTP_HOST_2 }}
-          GPORTAL_FTP_PORT_2: ${{ secrets.GPORTAL_FTP_PORT_2 }}
-          GPORTAL_FTP_USER_2: ${{ secrets.GPORTAL_FTP_USER_2 }}
-          GPORTAL_FTP_PASS_2: ${{ secrets.GPORTAL_FTP_PASS_2 }}
         run: PYTHONPATH=src python -m fs25_farm_bridge --server 1
 
   sync_server_2:
@@ -78,12 +70,4 @@ jobs:
         continue-on-error: true
         env:
           BASE44_API_KEY: ${{ secrets.BASE44_API_KEY }}
-          GPORTAL_FTP_HOST_1: ${{ secrets.GPORTAL_FTP_HOST_1 }}
-          GPORTAL_FTP_PORT_1: ${{ secrets.GPORTAL_FTP_PORT_1 }}
-          GPORTAL_FTP_USER_1: ${{ secrets.GPORTAL_FTP_USER_1 }}
-          GPORTAL_FTP_PASS_1: ${{ secrets.GPORTAL_FTP_PASS_1 }}
-          GPORTAL_FTP_HOST_2: ${{ secrets.GPORTAL_FTP_HOST_2 }}
-          GPORTAL_FTP_PORT_2: ${{ secrets.GPORTAL_FTP_PORT_2 }}
-          GPORTAL_FTP_USER_2: ${{ secrets.GPORTAL_FTP_USER_2 }}
-          GPORTAL_FTP_PASS_2: ${{ secrets.GPORTAL_FTP_PASS_2 }}
         run: PYTHONPATH=src python -m fs25_farm_bridge --server 2
