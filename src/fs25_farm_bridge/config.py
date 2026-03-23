@@ -52,8 +52,8 @@ class Config:
         )
 
     def _load_servers(self) -> List[ServerConfig]:
-        # BASE44_API_KEY is the API key for the agent app (69bd745a05c2dd67076e46de)
-        api_key = self._require("BASE44_API_KEY")
+        # SERVERHUB_API_KEY is the API key for the agent app (69bd745a05c2dd67076e46de)
+        api_key = self._require("SERVERHUB_API_KEY")
         return [
             self._load_server(server_id=1, api_key=api_key),
             self._load_server(server_id=2, api_key=api_key),
@@ -85,3 +85,4 @@ class Config:
         if not value:
             raise EnvironmentError(f"Missing required env var: {key}")
         return value
+
