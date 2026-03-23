@@ -225,7 +225,7 @@ def _sync_to_base44(data: Dict[str, Any], api_key: str) -> None:
             "mapName": data.get("mapName", ""),
             "playersOnline": data.get("playersOnline", 0),
             "playerSlots": data.get("playerSlots", 16),
-            "currentTime": data.get("currentTime", ""),
+            "currentDay": data.get("currentDay", 0),
             "lastUpdated": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         })
 
@@ -238,27 +238,19 @@ def _sync_to_base44(data: Dict[str, Any], api_key: str) -> None:
             _upsert(session, "Farm", "farmId", farm_key, {
                 "farmId": farm_key,
                 "farmName": farm.get("farmName", ""),
-                "color": str(farm.get("color", "0")),
                 "balance": farm.get("balance", 0),
-                "loan": farm.get("loan", 0),
-                "serverName": server_name,
-                "workedHectares": round(fl_info["area"], 2),
-                "farmlandCount": fl_info["count"],
+                "fieldCount": fl_info["count"],
             })
 
         # 3. Fields (bulk replace — too many to diff)
         _bulk_replace(session, "Field", server_name, [
             {
                 "fieldId": f.get("fieldId", ""),
-                "fruitType": f.get("fruitType", ""),
-                "growthState": f.get("growthState", 0),
-                "isOwned": f.get("isOwned", False),
+                "cropType": f.get("fruitType", ""),
+                "growthStage": f.get("growthState", 0),
+                "fertilized": f.get("sprayLevel", 0) > 0,
+                "weeds": round(f.get("weedState", 0) * 3),
                 "harvestReady": f.get("harvestReady", False),
-                "weedState": f.get("weedState", 0),
-                "sprayLevel": f.get("sprayLevel", 0),
-                "limeLevel": f.get("limeLevel", 0),
-                "plowLevel": f.get("plowLevel", 0),
-                "needsAttention": f.get("needsAttention", False),
                 "assignedFarm": f.get("assignedFarm", ""),
             }
             for f in data.get("fields", [])
@@ -269,12 +261,10 @@ def _sync_to_base44(data: Dict[str, Any], api_key: str) -> None:
             {
                 "vehicleName": v.get("vehicleName", ""),
                 "vehicleType": v.get("vehicleType", ""),
-                "category": v.get("category", ""),
-                "status": v.get("status", "idle"),
-                "operator": v.get("operator", ""),
-                "fillTypes": v.get("fillTypes", ""),
-                "fillLevels": v.get("fillLevels", ""),
                 "location": v.get("location", ""),
+                "operator": v.get("operator", ""),
+                "status": v.get("status", "idle"),
+                "assignedFarm": "",
             }
             for v in data.get("vehicles", [])[:150]
         ])
@@ -315,5 +305,6 @@ def fetch_server_data(server_id: int) -> Dict[str, Any]:
     config = Config()
     server = config.get_servers(selected_server=server_id)[0]
     return _fetch_server_data(server, config.request_timeout, config.retry_attempts)
+
 
 
