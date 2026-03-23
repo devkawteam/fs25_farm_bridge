@@ -1,6 +1,6 @@
 import logging
 import os
-import json
+import datetime
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -23,22 +23,17 @@ _SERVER_FEEDS = {
     },
 }
 
-BASE44_INGEST_URL = os.environ.get(
-    "BASE44_API_URL",
-    "https://kaws-agent-076e46de.base44.app/functions/farmIntelligenceIngest",
-)
-
-# ServerHub app direct API — same BASE44_API_KEY works for both apps
+# ServerHub app (kawsplayground.online) — single destination
 _SERVERHUB_APP_ID = "69ac6dca5af2dc4d433b68bd"
 _SERVERHUB_ENTITY_URL = (
     f"https://api.base44.com/api/apps/{_SERVERHUB_APP_ID}/entities/FS25SaveData"
 )
 
-# Playground name → playground ID mapping
 _PLAYGROUND_MAP = {
     "kaw's farming playground 1": "pg1",
     "kaw's farming playground 2": "pg2",
 }
+
 
 def _daytime_to_hhmm(day_time_ms: int) -> str:
     total_seconds = day_time_ms // 1000
@@ -48,12 +43,10 @@ def _daytime_to_hhmm(day_time_ms: int) -> str:
 
 
 def _parse_stats_xml(root: Any, server_name: str) -> Dict[str, Any]:
-    """Parse dedicated-server-stats.xml — PascalCase tags."""
     map_name = root.get("mapName", "")
     day_time_ms = int(root.get("dayTime", "0"))
     current_time = _daytime_to_hhmm(day_time_ms)
 
-    # Players
     slots_el = root.find("Slots")
     players_online = 0
     player_slots = 10
@@ -69,7 +62,6 @@ def _parse_stats_xml(root: Any, server_name: str) -> Dict[str, Any]:
                     "isAdmin": p.get("isAdmin", "false") == "true",
                 })
 
-    # Farmlands (PascalCase)
     farmlands = []
     farm_ids_from_farmlands: Dict[str, Dict] = {}
     for fl in root.findall(".//Farmland"):
@@ -89,41 +81,30 @@ def _parse_stats_xml(root: Any, server_name: str) -> Dict[str, Any]:
             farm_ids_from_farmlands[owner_id]["area"] += float(fl.get("area", "0") or "0")
             farm_ids_from_farmlands[owner_id]["count"] += 1
 
-    # Fields (PascalCase)
     fields = []
     for f in root.findall(".//Field"):
-        is_owned = f.get("isOwned", "false") == "true"
         fields.append({
             "fieldId": f.get("id", ""),
             "fruitType": f.get("fruitType", ""),
             "growthState": f.get("growthState", "0"),
-            "isOwned": is_owned,
+            "isOwned": f.get("isOwned", "false") == "true",
             "weedState": f.get("weedFactor", "0"),
             "sprayLevel": f.get("sprayLevel", "0"),
             "limeLevel": f.get("limeLevel", "0"),
             "plowLevel": f.get("plowLevel", "0"),
-            "harvestReady": False,
-            "needsAttention": False,
             "assignedFarm": f.get("ownedByFarmId", ""),
-            "groundType": "",
-            "cropType": "",
-            "x": f.get("x", "0"),
-            "z": f.get("z", "0"),
         })
 
-    # Vehicles (PascalCase)
     vehicles = []
     for v in root.findall(".//Vehicle"):
         vehicles.append({
             "vehicleName": v.get("name", ""),
             "vehicleType": v.get("type", ""),
             "category": v.get("category", ""),
-            "status": "active",
             "operator": v.get("controllerName", ""),
             "fillTypes": v.get("fillTypes", ""),
             "fillLevels": v.get("fillLevels", ""),
             "location": f"{v.get('x','0')},{v.get('z','0')}",
-            "assignedFarm": "",
         })
 
     return {
@@ -141,7 +122,6 @@ def _parse_stats_xml(root: Any, server_name: str) -> Dict[str, Any]:
 
 
 def _parse_career_xml(root: Any, farm_ids_hint: Dict = None) -> List[Dict]:
-    """Parse careerSavegame for farm data."""
     farms = []
     for farm_el in root.findall(".//farm"):
         farms.append({
@@ -152,10 +132,8 @@ def _parse_career_xml(root: Any, farm_ids_hint: Dict = None) -> List[Dict]:
             "color": farm_el.get("color", "0"),
             "players": [],
         })
-
     if farms:
         return farms
-
     if farm_ids_hint:
         for fid, info in sorted(farm_ids_hint.items()):
             farms.append({
@@ -167,12 +145,10 @@ def _parse_career_xml(root: Any, farm_ids_hint: Dict = None) -> List[Dict]:
                 "players": [],
                 "workedHectares": round(info["area"], 2),
             })
-
     return farms
 
 
 def _parse_economy_xml(root: Any) -> Dict[str, Any]:
-    """Parse economy XML for crop prices."""
     crop_prices: Dict[str, Any] = {}
     for fill_el in root.findall(".//fillType"):
         crop = fill_el.get("fillType", "")
@@ -206,15 +182,13 @@ def _fetch_server_data(server: ServerConfig, timeout: int, retry_attempts: int) 
     farm_ids_hint = payload.pop("_farmIdsFromFarmlands", {})
     current_time = payload.pop("currentTime", "")
 
-    farms = _parse_career_xml(career_root, farm_ids_hint) if career_root is not None else list(
+    farms = _parse_career_xml(career_root, farm_ids_hint) if career_root is not None else [
         {"farmId": fid, "farmName": f"Farm {fid}", "balance": 0, "loan": 0, "color": "0", "players": []}
         for fid in farm_ids_hint
-    )
+    ]
     payload["farms"] = farms
 
-    economy_data = _parse_economy_xml(economy_root) if economy_root is not None else {}
-    payload["economy"] = economy_data
-
+    payload["economy"] = _parse_economy_xml(economy_root) if economy_root is not None else {}
     payload["environment"] = {
         "currentDay": 0,
         "currentTime": current_time,
@@ -227,39 +201,12 @@ def _fetch_server_data(server: ServerConfig, timeout: int, retry_attempts: int) 
     return payload
 
 
-def _send_to_base44(data: Dict[str, Any]) -> bool:
-    url = BASE44_INGEST_URL
-    try:
-        response = requests.post(
-            url,
-            json=data,
-            headers={"Content-Type": "application/json"},
-            timeout=300,
-        )
-        if response.ok:
-            result = response.json()
-            print(f"[OK] '{data.get('serverName')}' synced: {result}")
-            return True
-        else:
-            print(f"[ERROR] '{data.get('serverName')}': {response.status_code} {response.text[:300]}")
-            return False
-    except Exception as exc:
-        logger.error("Request to Base44 failed: %s", exc)
-        print(f"[ERROR] Request failed: {exc}")
-        raise
-
-
 def _update_server_hub(data: Dict[str, Any], api_key: str) -> bool:
-    """
-    Write/update FS25SaveData in the ServerHub app (kawsplayground.online).
-    Uses the base44 REST API directly with BASE44_API_KEY.
-    """
-    import datetime
-
+    """Write live server data to FS25SaveData in the ServerHub app."""
     server_name = (data.get("serverName") or "").lower()
     playground = _PLAYGROUND_MAP.get(server_name)
     if not playground:
-        print(f"[HUB] Unknown server name '{server_name}', skipping ServerHub update.")
+        print(f"[HUB] Unknown server name '{server_name}', skipping.")
         return False
 
     session = requests.Session()
@@ -270,32 +217,25 @@ def _update_server_hub(data: Dict[str, Any], api_key: str) -> bool:
     })
 
     try:
-        # 1. Find existing record
-        resp = session.get(
-            _SERVERHUB_ENTITY_URL,
-            params={"playground": playground},
-            timeout=15,
-        )
+        # Find existing record
+        resp = session.get(_SERVERHUB_ENTITY_URL, params={"playground": playground}, timeout=15)
         resp.raise_for_status()
         payload = resp.json()
         records = payload if isinstance(payload, list) else payload.get("records", [])
         record_id = records[0]["id"] if records else None
 
-        # 2. Build crop prices list
+        # Crop prices
         crop_prices = []
-        economy = data.get("economy", {})
-        if economy.get("cropPrices"):
-            for crop, info in economy["cropPrices"].items():
-                history = info.get("priceHistory", {})
-                price_per_liter = next(iter(history.values()), 0)
-                price_ton = round(price_per_liter * 1000)
-                if price_ton > 0:
-                    crop_prices.append({"name": crop, "price": price_ton, "factor": 1})
+        for crop, info in (data.get("economy", {}).get("cropPrices") or {}).items():
+            history = info.get("priceHistory", {})
+            price_per_liter = next(iter(history.values()), 0)
+            price_ton = round(price_per_liter * 1000)
+            if price_ton > 0:
+                crop_prices.append({"name": crop, "price": price_ton, "factor": 1})
 
-        # 3. Build farms list with farmland stats
-        farmlands = data.get("farmlands", [])
+        # Farms with farmland stats
         farmland_by_owner: Dict[str, Dict] = {}
-        for fl in farmlands:
+        for fl in data.get("farmlands", []):
             owner = str(fl.get("owner", "0"))
             if owner and owner != "0":
                 if owner not in farmland_by_owner:
@@ -316,7 +256,7 @@ def _update_server_hub(data: Dict[str, Any], api_key: str) -> bool:
                 "farmland_count": fl_info["count"],
             })
 
-        # 4. Build vehicles list
+        # Vehicles
         hub_vehicles = []
         for idx, v in enumerate(data.get("vehicles", [])[:100]):
             loc = (v.get("location") or "0,0").split(",")
@@ -332,7 +272,6 @@ def _update_server_hub(data: Dict[str, Any], api_key: str) -> bool:
                 "needs_repair": False,
             })
 
-        # 5. Map URL
         map_url = (
             "http://144.126.158.162:9120/feed/dedicated-server-stats-map.jpg?code=mt3bqE0kBPlcS8Ld&quality=60&size=512"
             if playground == "pg1"
@@ -364,28 +303,19 @@ def _update_server_hub(data: Dict[str, Any], api_key: str) -> bool:
             "sync_status": "ok",
         }
 
-        # 6. Update or create
         if record_id:
-            resp2 = session.put(
-                f"{_SERVERHUB_ENTITY_URL}/{record_id}",
-                json=hub_data,
-                timeout=15,
-            )
+            resp2 = session.put(f"{_SERVERHUB_ENTITY_URL}/{record_id}", json=hub_data, timeout=15)
             resp2.raise_for_status()
-            print(f"[HUB] ✓ Updated FS25SaveData ({playground}) in ServerHub")
+            print(f"[HUB] ✓ Updated FS25SaveData ({playground})")
         else:
-            resp2 = session.post(
-                _SERVERHUB_ENTITY_URL,
-                json=hub_data,
-                timeout=15,
-            )
+            resp2 = session.post(_SERVERHUB_ENTITY_URL, json=hub_data, timeout=15)
             resp2.raise_for_status()
-            print(f"[HUB] ✓ Created FS25SaveData ({playground}) in ServerHub")
+            print(f"[HUB] ✓ Created FS25SaveData ({playground})")
 
         return True
 
     except Exception as exc:
-        print(f"[HUB] ✗ Failed to update ServerHub ({playground}): {exc}")
+        print(f"[HUB] ✗ Failed ({playground}): {exc}")
         logger.error("ServerHub update failed: %s", exc)
         return False
     finally:
@@ -411,13 +341,8 @@ def run(selected_server: Optional[int] = None, run_all: bool = False) -> None:
         print(f"  Farms: {len(data.get('farms', []))}")
         print(f"  Fields: {len(data.get('fields', []))}")
         print(f"  Vehicles: {len(data.get('vehicles', []))}")
-        print(f"  Farmlands: {len(data.get('farmlands', []))}")
         print(f"  Players online: {data.get('playersOnline', 0)}")
 
-        # Send to FarmSim monitoring app ingest function
-        _send_to_base44(data)
-
-        # Also update kawsplayground.online ServerHub (FS25SaveData)
         _update_server_hub(data, server.base44_api_key)
 
         logger.info("Done with server %s.", server.server_id)
