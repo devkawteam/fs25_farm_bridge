@@ -66,7 +66,7 @@ class Config:
                     f"BASE44_API_URL_{suffix}", os.environ.get("BASE44_API_URL")
                 )
                 base44_api_key = os.environ.get(
-                    f"BASE44_API_KEY_{suffix}", os.environ.get("BASE44_API_KEY")
+                    "BASE44_API_KEY", os.environ.get(f"BASE44_API_KEY_{suffix}")
                 )
                 if not base44_api_url:
                     raise EnvironmentError(
@@ -83,7 +83,16 @@ class Config:
                     ServerConfig(
                         server_id=server_id,
                         name=os.environ.get(
-                            f"SERVER_NAME_{suffix}", f"Farm Server {server_id}"
+                            f"SERVER_NAME_{suffix}",
+                            (
+                                "KAW's farming playground 1"
+                                if server_id == 1
+                                else (
+                                    "KAW's farming playground 2"
+                                    if server_id == 2
+                                    else f"Farm Server {server_id}"
+                                )
+                            ),
                         ),
                         ftp_host=host,
                         ftp_port=ftp_port,

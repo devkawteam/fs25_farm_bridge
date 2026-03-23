@@ -68,11 +68,14 @@ def parse_environment(root: ET.Element) -> Dict[str, Any]:
 def parse_farms(root: ET.Element) -> List[Dict[str, Any]]:
     farms = []
     for farm_el in root.findall(".//farm"):
+        money = farm_el.get("money", "0")
         farms.append(
             {
                 "farmId": farm_el.get("farmId"),
                 "name": farm_el.get("name", ""),
-                "money": farm_el.get("money", "0"),
+                "farmName": farm_el.get("name", ""),
+                "money": money,
+                "balance": money,
                 "loan": farm_el.get("loan", "0"),
                 "color": farm_el.get("color", "0"),
             }
@@ -119,11 +122,15 @@ def parse_economy(root: ET.Element) -> Dict[str, Any]:
 def parse_players(root: ET.Element) -> List[Dict[str, Any]]:
     players = []
     for player_el in root.findall(".//player"):
+        nickname = player_el.get("lastNickname", "")
+        play_time = player_el.get("playTime", player_el.get("playTimeHours", "0"))
         players.append(
             {
                 "uniqueUserId": player_el.get("uniqueUserId"),
                 "farmId": player_el.get("farmId"),
-                "name": player_el.get("lastNickname", ""),
+                "name": nickname,
+                "nickname": nickname,
+                "stats": {"playTime": play_time},
                 "isAdmin": player_el.get("isAdmin", "false"),
                 "isOnline": player_el.get("isOnline", "false"),
             }
