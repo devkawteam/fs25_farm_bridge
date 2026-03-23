@@ -4,22 +4,32 @@ from typing import Any, Dict, List, Optional
 from .base44 import Base44Client
 from .config import Config, ServerConfig
 from .state import BridgeState
-from .utils import (
+from fs25_farm_bridge.utils import (
     fetch_http_xml,
-    merge_data,
-    merge_by_key,
     parse_economy,
     parse_environment,
     parse_farms,
     parse_fields,
     parse_players,
-    parse_server_name,
     parse_vehicles,
 )
 
 logger = logging.getLogger(__name__)
 
-_SAVEGAME_FILES = ("careerSavegame", "vehicles", "economy")
+_SERVER_FEEDS = {
+    1: {
+        "stats": "http://144.126.158.162:9120/feed/dedicated-server-stats.xml?code=mt3bqE0kBPlcS8Ld",
+        "career": "http://144.126.158.162:9120/feed/dedicated-server-savegame.html?code=mt3bqE0kBPlcS8Ld&file=careerSavegame",
+        "economy": "http://144.126.158.162:9120/feed/dedicated-server-savegame.html?code=mt3bqE0kBPlcS8Ld&file=economy",
+        "vehicles": "http://144.126.158.162:9120/feed/dedicated-server-savegame.html?code=mt3bqE0kBPlcS8Ld&file=vehicles",
+    },
+    2: {
+        "stats": "http://144.126.153.108:9110/feed/dedicated-server-stats.xml?code=Axa2ixzvN7Gj8bQ3",
+        "career": "http://144.126.153.108:9110/feed/dedicated-server-savegame.html?code=Axa2ixzvN7Gj8bQ3&file=careerSavegame",
+        "economy": "http://144.126.153.108:9110/feed/dedicated-server-savegame.html?code=Axa2ixzvN7Gj8bQ3&file=economy",
+        "vehicles": "http://144.126.153.108:9110/feed/dedicated-server-savegame.html?code=Axa2ixzvN7Gj8bQ3&file=vehicles",
+    },
+}
 
 
 # ---------------------------------------------------------------------------
@@ -77,58 +87,32 @@ def _fetch_server_data(
     timeout: int,
     retry_attempts: int,
 ) -> Dict[str, Any]:
-    live_root = fetch_http_xml(server.stats_feed_url, timeout=timeout, retry_attempts=retry_attempts)
-
-    live_data: Dict[str, Any] = {
-        "serverName": server.name,
-        "environment": {},
-        "players": [],
-        "farms": [],
-        "fields": [],
-        "vehicles": [],
-    }
-    if live_root is not None:
-        parsed_server_name = parse_server_name(live_root)
-        live_data = {
-            "serverName": parsed_server_name or server.name,
-            "environment": parse_environment(live_root),
-            "players": parse_players(live_root),
-            "farms": parse_farms(live_root),
-            "fields": parse_fields(live_root),
-            "vehicles": parse_vehicles(live_root),
+    urls = _SERVER_FEEDS.get(server.server_id)
+    if urls is None:
+        logger.error("No HTTP feed mapping for server_id=%s", server.server_id)
+        return {
+            "serverName": server.name,
+            "environment": {},
+            "players": [],
+            "farms": [],
+            "fields": [],
+            "vehicles": [],
+            "economy": {},
         }
 
-    savegame_roots: Dict[str, Any] = {}
-    for file_name in _SAVEGAME_FILES:
-        root = fetch_http_xml(
-            server.savegame_feed_url(file_name),
-            timeout=timeout,
-            retry_attempts=retry_attempts,
-        )
-        if root is not None:
-            savegame_roots[file_name] = root
+    stats_root = fetch_http_xml(urls["stats"], timeout=timeout, retry_attempts=retry_attempts)
+    career_root = fetch_http_xml(urls["career"], timeout=timeout, retry_attempts=retry_attempts)
+    economy_root = fetch_http_xml(urls["economy"], timeout=timeout, retry_attempts=retry_attempts)
+    vehicles_root = fetch_http_xml(urls["vehicles"], timeout=timeout, retry_attempts=retry_attempts)
 
-    career_root = savegame_roots.get("careerSavegame")
-    vehicles_root = savegame_roots.get("vehicles")
-    economy_root = savegame_roots.get("economy")
-
-    save_data = {
-        "environment": parse_environment(career_root) if career_root is not None else {},
-        "players": parse_players(career_root) if career_root is not None else [],
+    return {
+        "serverName": server.name,
+        "environment": parse_environment(stats_root) if stats_root is not None else {},
+        "players": parse_players(stats_root) if stats_root is not None else [],
         "farms": parse_farms(career_root) if career_root is not None else [],
         "fields": parse_fields(career_root) if career_root is not None else [],
         "vehicles": parse_vehicles(vehicles_root) if vehicles_root is not None else [],
         "economy": parse_economy(economy_root) if economy_root is not None else {},
-    }
-
-    return {
-        "serverName": live_data.get("serverName") or server.name,
-        "environment": merge_data(live_data["environment"], save_data["environment"]),
-        "players": merge_by_key(live_data["players"], save_data["players"], "uniqueUserId"),
-        "farms": merge_by_key(live_data["farms"], save_data["farms"], "farmId"),
-        "fields": merge_by_key(live_data["fields"], save_data["fields"], "fieldId"),
-        "vehicles": merge_by_key(live_data["vehicles"], save_data["vehicles"], "vehicleId"),
-        "economy": save_data["economy"],
     }
 
 
