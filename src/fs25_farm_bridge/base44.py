@@ -32,7 +32,7 @@ class Base44Client:
         self.api_url = api_url.rstrip("/") if api_url else _FARMER_PROFILE_ENDPOINT
         self.timeout = timeout
         self.retry_attempts = retry_attempts
-        self.farmer_profile_url = _FARMER_PROFILE_ENDPOINT
+        self.farmer_profile_url = self.api_url or _FARMER_PROFILE_ENDPOINT
 
         self._session = requests.Session()
         self._session.headers.update(
@@ -114,55 +114,6 @@ class Base44Client:
         logger.error("All %d attempts failed for %s %s", self.retry_attempts, method, url)
         return None
 
-    def _post(self, endpoint: str, payload: Any) -> bool:
-        """
-        POST *payload* as JSON to *endpoint*.
-        Returns True on success, False if all retry attempts are exhausted.
-        """
-        url = f"{self.api_url}/{endpoint.lstrip('/')}"
-
-        for attempt in range(1, self.retry_attempts + 1):
-            response: Optional[requests.Response] = None
-            try:
-                response = self._session.post(url, json=payload, timeout=self.timeout)
-                response.raise_for_status()
-                logger.info("POST %s -> %s", url, response.status_code)
-                return True
-
-            except requests.exceptions.Timeout:
-                logger.warning(
-                    "Attempt %d/%d timed out for %s", attempt, self.retry_attempts, url
-                )
-
-            except requests.exceptions.HTTPError as exc:
-                status = response.status_code if response is not None else "?"
-                logger.error(
-                    "HTTP %s on attempt %d/%d for %s: %s",
-                    status,
-                    attempt,
-                    self.retry_attempts,
-                    url,
-                    exc,
-                )
-                # 4xx errors are client errors — retrying won't help
-                if response is not None and 400 <= response.status_code < 500:
-                    break
-
-            except requests.exceptions.RequestException as exc:
-                logger.warning(
-                    "Request error on attempt %d/%d for %s: %s",
-                    attempt,
-                    self.retry_attempts,
-                    url,
-                    exc,
-                )
-
-            if attempt < self.retry_attempts:
-                time.sleep(2**attempt)
-
-        logger.error("All %d attempts failed for %s", self.retry_attempts, url)
-        return False
-
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -216,21 +167,6 @@ class Base44Client:
             response.status_code,
         )
         return False
-
-    def send_environment(self, data: Dict[str, Any]) -> bool:
-        return self._post("environment", data)
-
-    def send_farms(self, farms: List[Dict[str, Any]]) -> bool:
-        return self._post("farms", {"farms": farms})
-
-    def send_fields(self, fields: List[Dict[str, Any]]) -> bool:
-        return self._post("fields", {"fields": fields})
-
-    def send_economy(self, data: Dict[str, Any]) -> bool:
-        return self._post("economy", data)
-
-    def send_players(self, players: List[Dict[str, Any]]) -> bool:
-        return self._post("players", {"players": players})
 
     def close(self) -> None:
         self._session.close()

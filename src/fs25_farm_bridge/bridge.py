@@ -183,14 +183,13 @@ def _sync(
         }
         for farm in farms
     ]
-    farmer_profiles = build_farmer_profiles(farms_with_players, server.name)
+    farmer_profiles = build_farmer_profiles(
+        farms_with_players,
+        server_name=server.name,
+        economy=economy,
+    )
 
-    # -- Smart sync: only forward what changed --
-    _publish_environment(state, client, environment)
-    _publish_farms(state, client, farms)
-    _publish_fields(state, client, fields)
-    _publish_economy(state, client, economy)
-    _publish_players(state, client, players)
+    # Smart sync and publish FarmerProfile entities only.
     _publish_farmer_profiles(state, client, farmer_profiles)
 
     logger.info(
@@ -200,69 +199,11 @@ def _sync(
     )
 
 
-def _publish_environment(
-    state: BridgeState, client: Base44Client, environment: dict
-) -> None:
-    if not environment:
-        return
-    if state.has_changed("environment", environment):
-        logger.info("Environment changed — sending to Base44.")
-        client.send_environment(environment)
-    else:
-        logger.debug("Environment unchanged — skipped.")
-
-
-def _publish_farms(
-    state: BridgeState, client: Base44Client, farms: List[dict]
-) -> None:
-    changed: List[dict] = [
-        farm for farm in farms
-        if state.has_changed(f"farm_{farm.get('farmId')}", farm)
-    ]
-    if changed:
-        logger.info("%d farm(s) changed — sending to Base44.", len(changed))
-        client.send_farms(changed)
-    else:
-        logger.debug("All farms unchanged — skipped.")
-
-
-def _publish_fields(
-    state: BridgeState, client: Base44Client, fields: List[dict]
-) -> None:
-    changed: List[dict] = [
-        field for field in fields
-        if state.has_changed(f"field_{field.get('fieldId')}", field)
-    ]
-    if changed:
-        logger.info("%d field(s) changed — sending to Base44.", len(changed))
-        client.send_fields(changed)
-    else:
-        logger.debug("All fields unchanged — skipped.")
-
-
-def _publish_economy(
-    state: BridgeState, client: Base44Client, economy: dict
-) -> None:
-    if not economy:
-        return
-    if state.has_changed("economy", economy):
-        logger.info("Economy changed — sending to Base44.")
-        client.send_economy(economy)
-    else:
-        logger.debug("Economy unchanged — skipped.")
-
-
-def _publish_players(
-    state: BridgeState, client: Base44Client, players: List[dict]
-) -> None:
-    if state.has_changed("players", players):
-        logger.info("Players changed — sending to Base44.")
-        client.send_players(players)
-    else:
-        logger.debug("Players unchanged — skipped.")
-
-
-def build_farmer_profiles(farms: List[dict], server_name: str) -> List[dict]:
+def build_farmer_profiles(
+    farms: List[dict],
+    server_name: str,
+    economy: Optional[dict] = None,
+) -> List[dict]:
     """
     Build one FarmerProfile record per player from farm-oriented source data.
     """
@@ -272,7 +213,6 @@ def build_farmer_profiles(farms: List[dict], server_name: str) -> List[dict]:
         farm_name = farm.get("farmName") or farm.get("name") or ""
         money = farm.get("balance") if farm.get("balance") is not None else farm.get("money")
         loan = farm.get("loan", 0)
-        farm_color = farm.get("color", "")
         farm_players = farm.get("players") or []
 
         for player in farm_players:
@@ -287,10 +227,12 @@ def build_farmer_profiles(farms: List[dict], server_name: str) -> List[dict]:
                     if isinstance(player.get("stats"), dict)
                     else player.get("playTime", 0)
                 ),
-                "farm_color": farm_color,
                 "notify_server": server_name,
-                "is_active": True,
             }
+
+            if economy:
+                profile["economy_income"] = economy.get("income")
+                profile["economy_expenses"] = economy.get("expenses")
 
             if profile["discord_id"] and profile["ingame_name"]:
                 profiles.append(profile)
