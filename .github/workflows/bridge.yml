@@ -17,7 +17,7 @@ jobs:
         run: pip install -r requirements.txt
       - name: Run Server 1 sync
         env:
-          SERVERHUB_API_KEY: ${{ secrets.SERVERHUB_API_KEY }}
+          BASE44_API_KEY: ${{ secrets.BASE44_API_KEY }}
         run: PYTHONPATH=src python -m fs25_farm_bridge --server 1
 
   sync_server_2:
@@ -33,5 +33,5 @@ jobs:
         run: pip install -r requirements.txt
       - name: Run Server 2 sync
         env:
-          SERVERHUB_API_KEY: ${{ secrets.SERVERHUB_API_KEY }}
+          BASE44_API_KEY: ${{ secrets.BASE44_API_KEY }}
         run: PYTHONPATH=src python -m fs25_farm_bridge --server 2
