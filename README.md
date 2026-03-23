@@ -2,7 +2,7 @@
 
 Bridge Farming Simulator 25 save/live data from one or more GPortal servers into Base44.
 
-Data is fetched exclusively via the FS25 HTTP Web API feed — no FTP is used.
+Data is fetched exclusively via the FS25 HTTP Web API feed.
 
 ## Environment variables
 
