@@ -52,7 +52,7 @@ class Config:
         )
 
     def _load_servers(self) -> List[ServerConfig]:
-        # SERVERHUB_API_KEY is the API key for the agent app (69bd745a05c2dd67076e46de)
+        # SERVERHUB_API_KEY is the API key for KAWs Farming Operations Control Center (69ac6dca5af2dc4d433b68bd)
         api_key = self._require("SERVERHUB_API_KEY")
         return [
             self._load_server(server_id=1, api_key=api_key),
